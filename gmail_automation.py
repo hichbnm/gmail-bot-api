@@ -1332,35 +1332,25 @@ class GmailAutomation:
 
         context = self.contexts[email]
 
-        # First, check if we have an existing valid session
-        print(f"📧 Checking existing session for {email}...")
-        session_valid = await self.check_session_validity(email)
-
-        if session_valid:
-            print(f"✅ Using existing valid session")
-            # Use existing page from context
-            pages = context.pages
-            if pages:
-                page = pages[0]
-            else:
-                page = await context.new_page()
+        # Use existing page from context if available, otherwise create new one
+        pages = context.pages
+        if pages:
+            page = pages[0]
+            print(f"📧 Using existing page for {email}")
         else:
-            print(f"🔄 Creating new page for {email}")
             page = await context.new_page()
+            print(f"� Created new page for {email}")
 
         try:
             print(f"📧 Starting email send process for {email}")
             print(f"   To: {to}")
             print(f"   Subject: {subject}")
 
-            # Step 1: Navigate to Gmail (only if session is not valid)
-            if not session_valid:
-                print(f"   Step 1: Navigating to Gmail...")
-                await page.goto("https://mail.google.com")
-                await page.wait_for_timeout(3000)  # Wait for page to load
-                await page.screenshot(path=f"screenshots/send_email_step1_navigate_{email}.png")
-            else:
-                print(f"   Step 1: Already on Gmail, skipping navigation")
+            # Step 1: Navigate to Gmail (always navigate to ensure we're on Gmail)
+            print(f"   Step 1: Navigating to Gmail...")
+            await page.goto("https://mail.google.com")
+            await page.wait_for_timeout(3000)  # Wait for page to load
+            await page.screenshot(path=f"screenshots/send_email_step1_navigate_{email}.png")
 
             # Step 2: Wait for Gmail to fully load and find compose button
             print(f"   Step 2: Waiting for Gmail to load...")
@@ -1621,8 +1611,8 @@ class GmailAutomation:
             return False
         finally:
             # Only close the page if we created a new one (not reusing existing session)
-            if not session_valid:
-                await page.close()
+            # Since we always navigate to Gmail now, we don't close existing pages
+            pass
 
     def get_sms_number(self, service: str = "google") -> Optional[str]:
         if not SMS_API_KEY:

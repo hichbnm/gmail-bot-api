@@ -11,12 +11,12 @@ from logging_config import log_info, log_error
 
 if __name__ == "__main__":
     try:
-        log_info("🚀 Starting Gmail Browser Automation Service...")
-        log_info(f"📡 API will be available at: http://{API_HOST}:{API_PORT}")
-        log_info("📧 Ready to handle Gmail automation requests!")
+        log_info("Starting Gmail Browser Automation Service...")
+        log_info(f"API will be available at: http://{API_HOST}:{API_PORT}")
+        log_info("Ready to handle Gmail automation requests!")
         uvicorn.run(app, host=API_HOST, port=API_PORT, log_level="info")
     except Exception as e:
-        log_error(f"❌ Failed to start service: {e}")
+        log_error(f"Failed to start service: {e}")
         raise
 """
 Gmail Browser Automation Service

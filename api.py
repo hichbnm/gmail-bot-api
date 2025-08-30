@@ -34,19 +34,23 @@ class SendRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
+    log_info("Starting Gmail API service...")
     await automation.start()
+    log_info("Gmail API service started successfully")
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    log_info("Shutting down Gmail API service...")
     await automation.stop()
+    log_info("Gmail API service shut down successfully")
 
 @app.post("/login_accounts")
 async def login_accounts(accounts: List[AccountCredentials]):
-    log_info(f"📧 Processing login request for {len(accounts)} account(s)")
+    log_info(f"Processing login request for {len(accounts)} account(s)")
     results = []
 
     for account in accounts:
-        log_info(f"🔐 Attempting login for: {account.email}")
+        log_info(f"Attempting login for: {account.email}")
         proxy = {
             "type": "socks5",  # Specify SOCKS5 proxy type
             "host": account.proxy_host,
@@ -64,72 +68,122 @@ async def login_accounts(accounts: List[AccountCredentials]):
             )
 
             if success:
-                log_info(f"✅ Login successful for: {account.email}")
+                log_info(f"Login successful for: {account.email}")
             else:
-                log_error(f"❌ Login failed for: {account.email}")
+                log_error(f"Login failed for: {account.email}")
 
             results.append({"email": account.email, "login_success": success})
         except Exception as e:
-            log_error(f"💥 Exception during login for {account.email}: {e}")
+            log_error(f"Exception during login for {account.email}: {e}")
             results.append({"email": account.email, "login_success": False, "error": str(e)})
 
-    log_info(f"📊 Login process completed. Success: {sum(1 for r in results if r['login_success'])}/{len(results)}")
+    log_info(f"Login process completed. Success: {sum(1 for r in results if r['login_success'])}/{len(results)}")
     return {"results": results}
 
 @app.post("/send_emails")
 async def send_emails(request: SendRequest):
+    log_info(f"Processing email send request: {len(request.accounts)} accounts, {len(request.emails)} emails")
     results = []
 
-    for i, account in enumerate(request.accounts):
-        if i >= len(request.emails):
-            results.append({"email": account.email, "status": "No email to send"})
+    # If we have more emails than accounts, distribute emails across accounts
+    # If we have more accounts than emails, each account gets one email (current behavior)
+    emails_per_account = len(request.emails) // len(request.accounts)
+    extra_emails = len(request.emails) % len(request.accounts)
+
+    email_index = 0
+
+    for account_idx, account in enumerate(request.accounts):
+        # Calculate how many emails this account should send
+        emails_for_this_account = emails_per_account
+        if account_idx < extra_emails:
+            emails_for_this_account += 1
+
+        # Check session ONCE per account, not per email
+        session_ready = False
+        if account.email not in automation.contexts:
+            log_info(f"Loading session for {account.email}")
+
+            # Create context and load cookies
+            proxy = {
+                "type": "socks5",  # Specify SOCKS5 proxy type
+                "host": account.proxy_host,
+                "port": account.proxy_port,
+                "username": account.proxy_user,
+                "password": account.proxy_pass
+            } if account.proxy_host else None
+
+            context = await automation.create_context(account.email, proxy)
+
+            # Check if cookies were loaded
+            cookies = await automation.load_cookies(account.email)
+            if cookies:
+                await context.add_cookies(cookies)
+                print(f"Cookies loaded for {account.email}")
+                session_ready = True
+            else:
+                log_error(f"No cookies found for {account.email} - please login first")
+                # Skip all emails for this account
+                for _ in range(emails_for_this_account):
+                    if email_index < len(request.emails):
+                        email_content = request.emails[email_index]
+                        results.append({
+                            "email": account.email,
+                            "to": email_content.to,
+                            "status": "No cookies found - please login first"
+                        })
+                        email_index += 1
+                continue
+        else:
+            session_ready = True
+            print(f"Session ready for {account.email}")
+
+        if not session_ready:
             continue
 
-        email_content = request.emails[i]
+        # Now send all emails for this account
+        for _ in range(emails_for_this_account):
+            if email_index >= len(request.emails):
+                break
 
-        try:
-            # Check if we have an active session for this account
-            if account.email not in automation.contexts:
-                print(f"🔄 Loading session for {account.email}")
+            email_content = request.emails[email_index]
+            log_info(f"Sending email {email_index + 1}/{len(request.emails)} from {account.email} to {email_content.to}")
 
-                # Create context and load cookies
-                proxy = {
-                    "type": "socks5",  # Specify SOCKS5 proxy type
-                    "host": account.proxy_host,
-                    "port": account.proxy_port,
-                    "username": account.proxy_user,
-                    "password": account.proxy_pass
-                } if account.proxy_host else None
+            try:
+                # Send the email (send_email method will handle session validation internally)
+                success = await automation.send_email(
+                    account.email,
+                    email_content.to,
+                    email_content.subject,
+                    email_content.body
+                )
 
-                context = await automation.create_context(account.email, proxy)
-
-                # Check if cookies were loaded
-                cookies = await automation.load_cookies(account.email)
-                if cookies:
-                    await context.add_cookies(cookies)
-                    print(f"✅ Cookies loaded for {account.email}")
+                if success:
+                    log_info(f"Email sent successfully from {account.email} to {email_content.to}")
+                    results.append({
+                        "email": account.email,
+                        "to": email_content.to,
+                        "status": "Email sent successfully"
+                    })
                 else:
-                    results.append({"email": account.email, "status": "No cookies found - please login first"})
-                    continue
+                    log_error(f"Failed to send email from {account.email} to {email_content.to}")
+                    results.append({
+                        "email": account.email,
+                        "to": email_content.to,
+                        "status": "Failed to send email"
+                    })
 
-            print(f"✅ Session ready for {account.email}")
+            except Exception as e:
+                log_error(f"Exception sending email from {account.email} to {email_content.to}: {e}")
+                results.append({
+                    "email": account.email,
+                    "to": email_content.to,
+                    "status": f"Error: {str(e)}"
+                })
 
-            # Send the email (send_email method will handle session validation internally)
-            success = await automation.send_email(
-                account.email,
-                email_content.to,
-                email_content.subject,
-                email_content.body
-            )
+            email_index += 1
 
-            if success:
-                results.append({"email": account.email, "status": "Email sent successfully"})
-            else:
-                results.append({"email": account.email, "status": "Failed to send email"})
-
-        except Exception as e:
-            results.append({"email": account.email, "status": f"Error: {str(e)}"})
-
+    successful_sends = sum(1 for r in results if r['status'] == 'Email sent successfully')
+    log_info(f"Email sending completed. Success: {successful_sends}/{len(request.emails)}")
     return {"results": results}
 
 @app.post("/upload_sheet")

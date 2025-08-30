@@ -183,12 +183,57 @@ The service is configured through environment variables in the `.env` file. Key 
 
 Edit `.env` to customize these settings. The `config.py` file loads these environment variables automatically.
 
-## Security Notes
+## Logging
 
-- Store sensitive data securely
-- Use HTTPS in production
-- Regularly update backup codes
-- Monitor for Gmail UI changes
+The service includes comprehensive logging for monitoring and debugging:
+
+### Log Files
+- **Main Log**: `logs/gmail_api.log` - All application events and errors
+- **Auto Rotation**: Logs rotate at 10MB with 5 backup files
+- **Security**: Log files are excluded from Git (contains sensitive info)
+
+### Log Levels
+- **DEBUG**: Detailed debugging information
+- **INFO**: General application events
+- **WARNING**: Warning messages for potential issues
+- **ERROR**: Error messages for failures
+- **CRITICAL**: Critical errors requiring immediate attention
+
+### Log Viewer
+
+Use the built-in log viewer to monitor and analyze logs:
+
+```bash
+# View last 50 log entries
+python log_viewer.py
+
+# View last 100 entries
+python log_viewer.py --lines 100
+
+# Search for specific text
+python log_viewer.py --search "login"
+
+# Filter by log level
+python log_viewer.py --level error
+
+# Show log statistics
+python log_viewer.py --stats
+
+# Clear logs (creates backup)
+python log_viewer.py --clear
+```
+
+### Log Configuration
+
+Configure logging through environment variables in `.env`:
+
+```bash
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FILE=logs/gmail_api.log
+LOG_MAX_SIZE=10485760  # 10MB
+LOG_BACKUP_COUNT=5
+```
 
 ## Troubleshooting
 
