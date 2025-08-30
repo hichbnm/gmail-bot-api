@@ -1,0 +1,28 @@
+{
+  "accounts": [
+    {
+      "first_from_name": "John",
+      "last_from_name": "Doe",
+      "email": "hichemmoussa189@gmail.com",
+      "email_pass": "",
+      "browser_pass": "your_actual_browser_password_here",
+      "backup_code": "7616 4388",
+      "proxy_host": null,
+      "proxy_port": null,
+      "proxy_user": null,
+      "proxy_pass": null
+    }
+  ],
+  "emails": [
+    {
+      "to": "recipient@example.com",
+      "subject": "Test Email from Gmail API",
+      "body": "Hello!\n\nThis is a test email sent via the Gmail Browser Automation API.\n\nBest regards,\nJohn Doe"
+    },
+    {
+      "to": "another@example.com",
+      "subject": "Another Test Email",
+      "body": "Hi there!\n\nThis is another test email to demonstrate bulk sending.\n\nRegards,\nJohn"
+    }
+  ]
+}

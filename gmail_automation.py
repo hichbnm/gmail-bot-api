@@ -1,0 +1,1657 @@
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import Dict, Optional
+
+from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+import requests
+
+from config import (
+    BROWSER_HEADLESS, COOKIE_STORAGE_PATH, SMS_API_KEY, SMS_API_URL,
+    GMAIL_LOGIN_URL, GMAIL_EMAIL_INPUT, GMAIL_PASSWORD_INPUT,
+    GMAIL_NEXT_BUTTON, GMAIL_SIGNIN_BUTTON, GMAIL_TRY_ANOTHER_WAY,
+    GMAIL_BACKUP_CODE_OPTION, GMAIL_BACKUP_CODE_INPUT, 
+    GMAIL_BACKUP_CODE_INPUT_ALT1, GMAIL_BACKUP_CODE_INPUT_ALT2,
+    GMAIL_BACKUP_CODE_INPUT_ALT3, GMAIL_BACKUP_CODE_INPUT_ALT4,
+    GMAIL_BACKUP_CODE_INPUT_ALT5, GMAIL_2FA_INPUT,
+    GMAIL_TRY_ANOTHER_WAY_TEXT, GMAIL_BACKUP_CODE_OPTION_TEXT,
+    GMAIL_COMPOSE_BUTTON, GMAIL_COMPOSE_BUTTON_ALT1, GMAIL_COMPOSE_BUTTON_ALT2, GMAIL_COMPOSE_BUTTON_ALT3,
+    GMAIL_TO_INPUT, GMAIL_SUBJECT_INPUT,
+    GMAIL_BODY_INPUT, GMAIL_SEND_BUTTON, GMAIL_CHECK_PHONE_TEXT,
+    GMAIL_APPROVE_DEVICE_TEXT, GMAIL_CONTINUE_BUTTON, GMAIL_NEXT_BUTTON_ALT,
+    GMAIL_DEVICE_APPROVED_TEXT, USE_PROXY, USE_FIREFOX_FOR_SOCKS5, SMART_LOGIN_DETECTION
+)
+
+class GmailAutomation:
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.contexts: Dict[str, BrowserContext] = {}
+        self.cookies_dir = Path(COOKIE_STORAGE_PATH)
+        self.cookies_dir.mkdir(exist_ok=True)
+        self.screenshots_dir = Path("screenshots")
+        self.screenshots_dir.mkdir(exist_ok=True)
+
+    async def start(self):
+        self.playwright = await async_playwright().start()
+
+        # Use Firefox for SOCKS5 proxy support, Chromium for everything else
+        # Firefox supports SOCKS5 proxy authentication, Chromium does not
+        # Choose browser based on proxy requirements
+        if USE_FIREFOX_FOR_SOCKS5:
+            print("🦊 Using Firefox browser for SOCKS5 proxy support")
+            browser_config = {
+                "headless": BROWSER_HEADLESS,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",  # Remove automation indicator
+                    "--disable-web-security",  # Disable web security
+                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",  # Firefox user agent
+                    "--accept-lang=en-US,en",  # Set language
+                    "--disable-extensions",  # Disable extensions
+                    "--disable-plugins",  # Disable plugins
+                    "--disable-images",  # Disable images for speed
+                ]
+            }
+            if USE_PROXY:
+                browser_config["proxy"] = {"server": "http://per-context"}  # Dummy global proxy as per Playwright docs
+            self.browser = await self.playwright.firefox.launch(**browser_config)
+        else:
+            print("🌐 Using Chromium browser (default)")
+            browser_config = {
+                "headless": BROWSER_HEADLESS,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",  # Remove automation indicator
+                    "--disable-web-security",  # Disable web security
+                    "--disable-features=VizDisplayCompositor",  # Disable certain features
+                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",  # Realistic user agent
+                    "--accept-lang=en-US,en",  # Set language
+                    "--disable-extensions",  # Disable extensions
+                    "--disable-plugins",  # Disable plugins
+                    "--disable-images",  # Disable images for speed
+                    "--disable-javascript-harmony-shipping",  # Disable certain JS features
+                ]
+            }
+            if USE_PROXY:
+                browser_config["proxy"] = {"server": "http://per-context"}  # Dummy global proxy as per Playwright docs
+            self.browser = await self.playwright.chromium.launch(**browser_config)
+
+    async def stop(self):
+        for context in self.contexts.values():
+            await context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+    def get_cookie_path(self, email: str) -> Path:
+        return self.cookies_dir / f"{email.replace('@', '_').replace('.', '_')}.json"
+
+    async def load_cookies(self, email: str) -> Optional[Dict]:
+        cookie_file = self.get_cookie_path(email)
+        if cookie_file.exists():
+            with open(cookie_file, 'r') as f:
+                return json.load(f)
+        return None
+
+    async def save_cookies(self, email: str, context: BrowserContext):
+        cookies = await context.cookies()
+        cookie_file = self.get_cookie_path(email)
+        with open(cookie_file, 'w') as f:
+            json.dump(cookies, f)
+
+    async def create_context(self, email: str, proxy: Optional[Dict] = None) -> BrowserContext:
+        if email in self.contexts:
+            return self.contexts[email]
+
+        context_options = {}
+        if proxy and USE_PROXY:
+            # Determine proxy type based on the proxy configuration
+            proxy_type = proxy.get("type", "socks5")  # Default to socks5 if not specified
+
+            print(f"🔧 Configuring {proxy_type.upper()} proxy: {proxy['host']}:{proxy['port']}")
+            print(f"👤 Username: {proxy.get('username', 'None')}")
+
+            if proxy_type.lower() == "socks5":
+                # For SOCKS5, we'll use a different approach since Chromium doesn't support SOCKS5 auth
+                print(f"⚠️  Chromium doesn't support SOCKS5 proxy authentication")
+                print(f"💡 Consider using HTTP proxy instead, or use Firefox browser")
+                print(f"🔄 Falling back to direct connection (no proxy)")
+
+                # Don't set proxy for SOCKS5 - let it fall through to no proxy
+                pass
+            else:
+                server_url = f"http://{proxy['host']}:{proxy['port']}"
+
+                context_options["proxy"] = {
+                    "server": server_url,
+                    "username": proxy.get("username"),
+                    "password": proxy.get("password")
+                }
+
+            print(f"🌐 Proxy configuration: {context_options['proxy']}")
+
+            # Test proxy connectivity (simple TCP connection test)
+            import socket
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)  # 5 second timeout
+                result = sock.connect_ex((proxy['host'], int(proxy['port'])))
+                sock.close()
+
+                if result == 0:
+                    print(f"✅ Proxy server is reachable: {proxy['host']}:{proxy['port']}")
+                else:
+                    print(f"⚠️  Proxy server is not reachable: {proxy['host']}:{proxy['port']}")
+            except Exception as e:
+                print(f"⚠️  Could not test proxy connectivity: {e}")
+        elif proxy and not USE_PROXY:
+            print(f"🚫 Proxy disabled in configuration (USE_PROXY=False)")
+        else:
+            print(f"🌐 No proxy configuration provided - using direct connection")
+
+        try:
+            context = await self.browser.new_context(**context_options)
+            print(f"✅ Browser context created successfully with proxy")
+        except Exception as proxy_error:
+            print(f"❌ Failed to create context with proxy: {proxy_error}")
+
+            # Fallback: Try without proxy
+            print(f"🔄 Attempting to create context without proxy...")
+            fallback_options = {k: v for k, v in context_options.items() if k != "proxy"}
+            try:
+                context = await self.browser.new_context(**fallback_options)
+                print(f"✅ Browser context created successfully without proxy (fallback)")
+            except Exception as fallback_error:
+                print(f"❌ Failed to create context even without proxy: {fallback_error}")
+                raise proxy_error  # Raise original error
+
+        # Add browser-specific scripts to hide automation indicators
+        if USE_FIREFOX_FOR_SOCKS5:
+            # Firefox-specific automation hiding
+            await context.add_init_script("""
+                // Hide automation indicators for Firefox
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+
+                // Mock plugins and languages for Firefox
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+                        { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                        { name: 'Native Client', description: '', filename: 'internal-nacl-plugin' }
+                    ],
+                });
+
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                });
+
+                // Mock permissions for Firefox
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+            """)
+        else:
+            # Chrome-specific automation hiding
+            await context.add_init_script("""
+                // Hide automation indicators for Chrome
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+
+                // Mock plugins and languages for Chrome
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+                        { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                        { name: 'Native Client', description: '', filename: 'internal-nacl-plugin' }
+                    ],
+                });
+
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                });
+
+                // Mock permissions for Chrome
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+            """)
+        
+        self.contexts[email] = context
+
+        # Load existing cookies
+        cookies = await self.load_cookies(email)
+        if cookies:
+            await context.add_cookies(cookies)
+
+        return context
+
+    async def login_gmail(self, email: str, browser_pass: str, backup_code: Optional[str] = None,
+                         proxy: Optional[Dict] = None) -> bool:
+        context = await self.create_context(email, proxy)
+        page = await context.new_page()
+
+        try:
+            print(f"  🌐 Navigating to Gmail login page...")
+            await page.goto(GMAIL_LOGIN_URL)
+            await page.wait_for_timeout(2000)  # Wait for page to load
+
+            # Debug: Take screenshot of initial page
+            await page.screenshot(path=f"screenshots/debug_initial_page_{email}.png")
+
+            # 🔍 Check if account is already logged in (redirects to myaccount.google.com)
+            current_url = page.url
+            print(f"  📍 Initial URL: {current_url}")
+
+            if "myaccount.google.com" in current_url:
+                print(f"  🔍 Detected Google Account page - checking if Gmail access is available...")
+                print(f"  📧 Account {email} might be authenticated - verifying Gmail access")
+
+                # Instead of assuming logged in, actually verify Gmail access
+                print(f"  📧 Testing Gmail access...")
+                await page.goto("https://mail.google.com")
+                await page.wait_for_timeout(3000)
+
+                gmail_url = page.url
+                if "mail.google.com" in gmail_url:
+                    print(f"  ✅ Successfully accessed Gmail - checking interface...")
+
+                    # Check multiple Gmail compose button selectors
+                    compose_selectors = [
+                        GMAIL_COMPOSE_BUTTON,
+                        GMAIL_COMPOSE_BUTTON_ALT1,
+                        GMAIL_COMPOSE_BUTTON_ALT2,
+                        GMAIL_COMPOSE_BUTTON_ALT3
+                    ]
+
+                    compose_count = 0
+                    for selector in compose_selectors:
+                        try:
+                            count = await page.locator(selector).count()
+                            if count > 0:
+                                compose_count = count
+                                print(f"  ✅ Found compose button with selector: {selector} ({count})")
+                                break
+                        except:
+                            pass
+
+                    if compose_count > 0:
+                        print(f"  ✅ Gmail interface confirmed - account was already logged in")
+                        await page.screenshot(path=f"screenshots/already_logged_in_success_{email}.png")
+                        await self.save_cookies(email, context)
+                        return True
+                    else:
+                        print(f"  ⚠️ Gmail URL reached but compose button not found - not fully logged in")
+                        # Continue with normal login flow
+                        print(f"  🔄 Proceeding with normal login flow...")
+                else:
+                    print(f"  ❌ Could not access Gmail, current URL: {gmail_url}")
+                    print(f"  🔄 Proceeding with normal login flow...")
+                    # Continue with normal login flow
+
+            # Check if email input field is present (normal login flow)
+            email_input_count = await page.locator(GMAIL_EMAIL_INPUT).count()
+            if email_input_count == 0:
+                print(f"  ⚠️ Email input field not found - unexpected page")
+                await page.screenshot(path=f"screenshots/no_email_input_{email}.png")
+                return False
+
+            # Check if email is already pre-filled (account might be partially logged in)
+            try:
+                email_value = await page.locator(GMAIL_EMAIL_INPUT).first.input_value()
+                if email_value and email_value.strip():
+                    print(f"  📧 Email already pre-filled: {email_value}")
+                    if email_value != email:
+                        print(f"  ⚠️ Pre-filled email ({email_value}) doesn't match target email ({email})")
+                        # Clear and re-enter the correct email
+                        await page.locator(GMAIL_EMAIL_INPUT).first.clear()
+                        await page.fill(GMAIL_EMAIL_INPUT, email)
+                        print(f"  ✏️ Corrected email to: {email}")
+            except:
+                pass
+
+            print(f"  ✉️ Starting normal login flow...")
+            await page.fill(GMAIL_EMAIL_INPUT, email)
+            await page.click(GMAIL_NEXT_BUTTON)
+            await page.wait_for_timeout(3000)
+
+            # Debug: Take screenshot after email entry
+            await page.screenshot(path=f"screenshots/debug_after_email_{email}.png")
+
+            # 🔍 SMART LOGIN DETECTION: Check if already logged in
+            print(f"  🔍 Checking if account is already logged in...")
+            await page.wait_for_timeout(2000)  # Brief wait for any redirect
+
+            current_url = page.url
+            print(f"  📍 URL after email entry: {current_url}")
+
+            # Check if redirected to Google Account page (might be logged in)
+            if "myaccount.google.com" in current_url:
+                print(f"  🔍 Detected Google Account page after email entry - verifying Gmail access...")
+
+                # Instead of assuming logged in, actually verify Gmail access
+                try:
+                    print(f"  📧 Testing Gmail access...")
+                    await page.goto("https://mail.google.com")
+                    await page.wait_for_timeout(5000)  # Increased wait time
+
+                    # Take screenshot to see what's loaded
+                    await page.screenshot(path=f"screenshots/gmail_loaded_{email}.png")
+
+                    gmail_url = page.url
+                    if "mail.google.com" in gmail_url:
+                        print(f"  ✅ Successfully accessed Gmail - checking interface...")
+
+                        # Check multiple Gmail compose button selectors
+                        compose_selectors = [
+                            GMAIL_COMPOSE_BUTTON,
+                            GMAIL_COMPOSE_BUTTON_ALT1,
+                            GMAIL_COMPOSE_BUTTON_ALT2,
+                            GMAIL_COMPOSE_BUTTON_ALT3
+                        ]
+
+                        compose_count = 0
+                        for selector in compose_selectors:
+                            try:
+                                count = await page.locator(selector).count()
+                                if count > 0:
+                                    compose_count = count
+                                    print(f"  ✅ Found compose button with selector: {selector} ({count})")
+                                    break
+                            except:
+                                pass
+
+                        if compose_count > 0:
+                            print(f"  ✅ Gmail interface confirmed - account was already logged in")
+                            await page.screenshot(path=f"screenshots/already_logged_in_success_{email}.png")
+                            await self.save_cookies(email, context)
+                            return True
+                        else:
+                            print(f"  ⚠️ Gmail URL reached but compose button not found - not fully logged in")
+                            # Check for other Gmail indicators
+                            inbox_indicators = [
+                                "[role='main']",
+                                "[data-message-store]",
+                                "text=/Inbox/i",
+                                "[aria-label*='Inbox']"
+                            ]
+
+                            gmail_confirmed = False
+                            for indicator in inbox_indicators:
+                                try:
+                                    if "text=" in indicator:
+                                        text = indicator.replace("text=", "").replace("/i", "")
+                                        count = await page.get_by_text(text).count()
+                                        print(f"  📊 Text indicator '{text}': {count}")
+                                    else:
+                                        count = await page.locator(indicator).count()
+                                        print(f"  📊 Selector indicator '{indicator}': {count}")
+                                    if count > 0:
+                                        gmail_confirmed = True
+                                        print(f"  ✅ Found Gmail indicator: {indicator}")
+                                        break
+                                except Exception as e:
+                                    print(f"  ⚠️ Error checking indicator {indicator}: {e}")
+
+                            if gmail_confirmed:
+                                print(f"  ✅ Gmail interface confirmed via indicators - account was already logged in")
+                                await page.screenshot(path=f"screenshots/already_logged_in_success_{email}.png")
+                                await self.save_cookies(email, context)
+                                return True
+                            else:
+                                print(f"  ⚠️ Gmail URL reached but interface not fully loaded - continuing with login")
+                                await page.screenshot(path=f"screenshots/already_logged_in_no_interface_{email}.png")
+                                # Continue with normal login flow
+                    else:
+                        print(f"  ❌ Could not access Gmail, current URL: {gmail_url}")
+                        await page.screenshot(path=f"screenshots/already_logged_in_no_gmail_{email}.png")
+                        # Continue with normal login flow
+                except Exception as e:
+                    print(f"  ❌ Error testing Gmail access: {e}")
+                    await page.screenshot(path=f"screenshots/already_logged_in_error_{email}.png")
+                    # Continue with normal login flow
+
+            # Check if directly redirected to Gmail (already logged in)
+            elif "mail.google.com" in current_url:
+                print(f"  🎉 DIRECT GMAIL ACCESS!")
+                print(f"  📧 Account {email} has direct Gmail access")
+
+                # Verify Gmail interface
+                compose_selectors = [
+                    GMAIL_COMPOSE_BUTTON,
+                    GMAIL_COMPOSE_BUTTON_ALT1,
+                    GMAIL_COMPOSE_BUTTON_ALT2,
+                    GMAIL_COMPOSE_BUTTON_ALT3
+                ]
+
+                compose_found = False
+                for selector in compose_selectors:
+                    try:
+                        count = await page.locator(selector).count()
+                        if count > 0:
+                            compose_found = True
+                            print(f"  ✅ Found compose button with selector: {selector}")
+                            break
+                    except:
+                        pass
+
+                if compose_found:
+                    print(f"  ✅ Gmail interface confirmed - saving cookies")
+                    await page.screenshot(path=f"screenshots/direct_gmail_success_{email}.png")
+                    await self.save_cookies(email, context)
+                    return True
+                else:
+                    print(f"  ⚠️ Gmail URL detected but compose button not found")
+                    await page.screenshot(path=f"screenshots/direct_gmail_no_compose_{email}.png")
+
+            # If not already logged in, proceed with password entry
+            print(f"  🔄 Account not already logged in, proceeding with password entry...")
+
+            # Enhanced password field detection with multiple attempts
+            print(f"  🔍 Looking for password field...")
+            password_found = False
+            max_attempts = 3
+
+            for attempt in range(max_attempts):
+                print(f"  🔄 Password field detection attempt {attempt + 1}/{max_attempts}")
+
+                # Wait for page to stabilize
+                await page.wait_for_timeout(2000)
+
+                # Check current URL to understand what page we're on
+                current_url = page.url
+                print(f"  📍 Current URL: {current_url}")
+
+                # Take screenshot for debugging
+                await page.screenshot(path=f"screenshots/debug_password_attempt_{attempt + 1}_{email}.png")
+
+                # Check if password field appears
+                password_field_count = await page.locator(GMAIL_PASSWORD_INPUT).count()
+                print(f"  🔑 Password field count: {password_field_count}")
+
+                if password_field_count > 0:
+                    password_found = True
+                    print(f"  ✅ Password field found on attempt {attempt + 1}")
+                    break
+                else:
+                    print(f"  ❌ Password field not found on attempt {attempt + 1}")
+
+                    # Check if we're on a different page that might need handling
+                    if "challenge" in current_url or "verify" in current_url:
+                        print(f"  ⚠️ Detected verification/challenge page: {current_url}")
+                        print(f"  💡 This might require manual intervention or different handling")
+                        await page.screenshot(path=f"screenshots/verification_page_{email}.png")
+                        return False
+
+                    # Check for "Forgot password?" or other recovery options
+                    recovery_selectors = [
+                        "text=/Forgot password/i",
+                        "text=/Reset password/i",
+                        "text=/Recover account/i",
+                        "[href*='recovery']",
+                        "[href*='forgot']"
+                    ]
+
+                    recovery_found = False
+                    for selector in recovery_selectors:
+                        try:
+                            if "text=" in selector:
+                                text = selector.replace("text=", "").replace("/i", "")
+                                count = await page.get_by_text(text).count()
+                            else:
+                                count = await page.locator(selector).count()
+
+                            if count > 0:
+                                print(f"  ⚠️ Recovery option found: {selector}")
+                                recovery_found = True
+                                break
+                        except:
+                            pass
+
+                    if recovery_found:
+                        print(f"  ❌ Account recovery required - cannot proceed automatically")
+                        await page.screenshot(path=f"screenshots/recovery_required_{email}.png")
+                        return False
+
+                    # If not the last attempt, wait longer and try again
+                    if attempt < max_attempts - 1:
+                        print(f"  ⏳ Waiting longer for password field to appear...")
+                        await page.wait_for_timeout(3000)
+
+            if not password_found:
+                print(f"  ❌ Password field not found after {max_attempts} attempts")
+                print(f"  💡 This might indicate:")
+                print(f"     - Account requires additional verification")
+                print(f"     - Gmail UI has changed")
+                print(f"     - Network/proxy issues")
+                await page.screenshot(path=f"screenshots/password_field_not_found_{email}.png")
+                return False
+
+            # Check if it's device approval flow
+            check_phone_count = await page.get_by_text(GMAIL_CHECK_PHONE_TEXT).count()
+            approve_device_count = await page.get_by_text(GMAIL_APPROVE_DEVICE_TEXT).count()
+
+            print(f"Login flow detection for {email}:")
+            print(f"  Password field: ✅ Found")
+            print(f"  Check phone text: {check_phone_count}")
+            print(f"  Approve device text: {approve_device_count}")
+
+            if check_phone_count > 0 or approve_device_count > 0:
+                print(f"  📱 Device approval required for {email}")
+                print(f"  💡 Please approve the device on your phone")
+                await page.screenshot(path=f"screenshots/device_approval_required_{email}.png")
+                return False
+
+            # Traditional login flow: email -> password -> 2FA
+            print(f"  → Traditional login flow detected")
+            print(f"  🔑 Entering password...")
+
+            # Take screenshot before password entry
+            await page.screenshot(path=f"screenshots/debug_before_password_{email}.png")
+
+            # Wait for password field to be ready
+            try:
+                await page.wait_for_selector(GMAIL_PASSWORD_INPUT, timeout=10000)
+                print(f"  ✅ Password field is ready")
+            except:
+                print(f"  ❌ Password field not found or not ready")
+                await page.screenshot(path=f"screenshots/debug_password_field_missing_{email}.png")
+                return False
+
+            # Enter password
+            try:
+                await page.fill(GMAIL_PASSWORD_INPUT, browser_pass)
+                print(f"  ✅ Password entered")
+                await page.screenshot(path=f"screenshots/debug_after_password_{email}.png")
+            except Exception as e:
+                print(f"  ❌ Failed to enter password: {e}")
+                await page.screenshot(path=f"screenshots/debug_password_error_{email}.png")
+                return False
+
+            # Click sign in button
+            try:
+                await page.click(GMAIL_SIGNIN_BUTTON)
+                print(f"  ✅ Sign in button clicked")
+                await page.screenshot(path=f"screenshots/debug_after_signin_click_{email}.png")
+            except Exception as e:
+                print(f"  ❌ Failed to click sign in: {e}")
+                await page.screenshot(path=f"screenshots/debug_signin_error_{email}.png")
+                return False
+
+            # Wait for next page to load (either 2FA or success)
+            print(f"  ⏳ Waiting for next page...")
+            await page.wait_for_timeout(5000)
+
+            # Take screenshot of what comes next
+            await page.screenshot(path=f"screenshots/debug_after_password_submit_{email}.png")
+
+            # Check for error messages
+            error_selectors = [
+                "[role='alert']",
+                ".error",
+                ".errormsg",
+                "[aria-label*='error']",
+                "[aria-label*='Error']",
+                "text=/error/i",
+                "text=/invalid/i",
+                "text=/wrong/i",
+                "text=/incorrect/i"
+            ]
+
+            error_found = False
+            for selector in error_selectors:
+                try:
+                    if "text=" in selector:
+                        text = selector.replace("text=", "").replace("/i", "")
+                        count = await page.get_by_text(text).count()
+                    else:
+                        count = await page.locator(selector).count()
+
+                    if count > 0:
+                        print(f"  ❌ Error found with selector '{selector}': {count}")
+                        error_found = True
+                        # Get the error text
+                        if "text=" in selector:
+                            error_text = await page.get_by_text(text).text_content()
+                        else:
+                            error_text = await page.locator(selector).first.text_content()
+                        print(f"     Error message: {error_text}")
+                        await page.screenshot(path=f"screenshots/debug_password_error_{email}.png")
+                        return False
+                except:
+                    pass
+
+            if not error_found:
+                print(f"  ✅ No password errors found")
+
+            # 🔍 DIRECT LOGIN DETECTION: Check if Gmail opens immediately after password
+            if SMART_LOGIN_DETECTION:
+                print(f"  🔍 Checking for direct Gmail access...")
+                await page.wait_for_timeout(2000)  # Brief wait for redirect
+
+                current_url = page.url
+                print(f"  📍 Current URL after password: {current_url}")
+
+                # Check if we've been redirected directly to Gmail (no 2FA required)
+                if "mail.google.com" in current_url:
+                    print(f"  🎉 DIRECT LOGIN SUCCESS! Gmail opened without 2FA")
+                    print(f"  📧 Account {email} logged in directly")
+
+                    # Verify we're actually in Gmail by checking for Gmail elements
+                    compose_count = await page.locator(GMAIL_COMPOSE_BUTTON).count()
+                    inbox_indicators = [
+                        "[role='main']",
+                        "[data-message-store]",
+                        "text=/Inbox/i",
+                        "[aria-label*='Inbox']"
+                    ]
+
+                    gmail_confirmed = compose_count > 0
+                    if not gmail_confirmed:
+                        for indicator in inbox_indicators:
+                            try:
+                                if "text=" in indicator:
+                                    text = indicator.replace("text=", "").replace("/i", "")
+                                    count = await page.get_by_text(text).count()
+                                else:
+                                    count = await page.locator(indicator).count()
+                                if count > 0:
+                                    gmail_confirmed = True
+                                    break
+                            except:
+                                pass
+
+                    if gmail_confirmed:
+                        print(f"  ✅ Gmail interface confirmed - saving cookies")
+                        await page.screenshot(path=f"screenshots/direct_login_success_{email}.png")
+                        await self.save_cookies(email, context)
+                        return True
+                    else:
+                        print(f"  ⚠️ Redirected to Gmail URL but Gmail interface not loaded yet")
+                        # Continue with normal flow
+
+                # Check for Google Account page redirect after password
+                elif "myaccount.google.com" in current_url:
+                    print(f"  🔄 Redirected to Google Account page after password")
+                    print(f"  📧 Attempting to navigate to Gmail...")
+
+                    try:
+                        await page.goto("https://mail.google.com")
+                        await page.wait_for_timeout(5000)  # Increased wait time
+
+                        gmail_url = page.url
+                        if "mail.google.com" in gmail_url:
+                            print(f"  ✅ Successfully navigated to Gmail from account page")
+
+                            # Take screenshot to see what's loaded
+                            await page.screenshot(path=f"screenshots/gmail_loaded_{email}.png")
+
+                            # Wait a bit more and check again
+                            await page.wait_for_timeout(3000)
+
+                            # Check multiple Gmail compose button selectors
+                            compose_selectors = [
+                                GMAIL_COMPOSE_BUTTON,
+                                GMAIL_COMPOSE_BUTTON_ALT1,
+                                GMAIL_COMPOSE_BUTTON_ALT2,
+                                GMAIL_COMPOSE_BUTTON_ALT3
+                            ]
+
+                            compose_count = 0
+                            for selector in compose_selectors:
+                                try:
+                                    count = await page.locator(selector).count()
+                                    if count > 0:
+                                        compose_count = count
+                                        print(f"  ✅ Found compose button with selector: {selector} ({count})")
+                                        break
+                                except:
+                                    pass
+
+                            print(f"  📊 Compose button count: {compose_count}")
+
+                            # Initialize gmail_loaded based on compose button
+                            gmail_loaded = compose_count > 0
+
+                            # If compose button not found, check other Gmail indicators
+                            if not gmail_loaded:
+                                inbox_indicators = [
+                                    "[role='main']",
+                                    "[data-message-store]",
+                                    "text=/Inbox/i",
+                                    "[aria-label*='Inbox']",
+                                    "text=/Compose/i",
+                                    "[href*='compose']",
+                                    ".bkK"
+                                ]
+
+                                for indicator in inbox_indicators:
+                                    try:
+                                        if "text=" in indicator:
+                                            text = indicator.replace("text=", "").replace("/i", "")
+                                            count = await page.get_by_text(text).count()
+                                            print(f"  📊 Text indicator '{text}': {count}")
+                                        else:
+                                            count = await page.locator(indicator).count()
+                                            print(f"  📊 Selector indicator '{indicator}': {count}")
+                                        if count > 0:
+                                            gmail_loaded = True
+                                            print(f"  ✅ Found Gmail indicator: {indicator}")
+                                            break
+                                    except Exception as e:
+                                        print(f"  ⚠️ Error checking indicator {indicator}: {e}")
+
+                            if gmail_loaded:
+                                print(f"  ✅ Gmail interface confirmed - saving cookies")
+                                await page.screenshot(path=f"screenshots/password_account_page_success_{email}.png")
+                                await self.save_cookies(email, context)
+                                return True
+                            else:
+                                print(f"  ⚠️ Gmail URL reached but interface not fully loaded")
+                                print(f"  💡 This might be a loading issue or UI change")
+                                # Don't return False here, let it continue to 2FA check
+                        else:
+                            print(f"  ❌ Failed to reach Gmail, current URL: {gmail_url}")
+                    except Exception as e:
+                        print(f"  ❌ Error navigating to Gmail: {e}")
+                else:
+                    print(f"  🚫 Smart login detection disabled")
+
+                # Check for 2FA if direct login didn't succeed
+                print(f"  🔐 Checking for 2FA requirements...")
+                await page.wait_for_timeout(3000)  # Wait for 2FA screen to load
+
+                # Debug: Take screenshot to see what's on the page
+                await page.screenshot(path=f"screenshots/debug_2fa_{email}.png")
+
+                # Look for 2FA challenge
+                try_another_way_count = await page.locator(GMAIL_TRY_ANOTHER_WAY).count()
+                try_another_way_text_count = await page.get_by_text(GMAIL_TRY_ANOTHER_WAY_TEXT).count()
+                phone_input_count = await page.locator(GMAIL_2FA_INPUT).count()
+
+                print(f"2FA Debug for {email}:")
+                print(f"  Try another way button: {try_another_way_count}")
+                print(f"  Try another way text: {try_another_way_text_count}")
+                print(f"  Phone input: {phone_input_count}")
+
+                if try_another_way_count > 0 or try_another_way_text_count > 0:
+                    print(f"2FA required for {email}, trying backup code...")
+
+                    # Try primary selector first, then text-based
+                    if try_another_way_count > 0:
+                        await page.click(GMAIL_TRY_ANOTHER_WAY)
+                    else:
+                        await page.get_by_text(GMAIL_TRY_ANOTHER_WAY_TEXT).click()
+
+                    await page.wait_for_timeout(2000)
+
+                    # Take screenshot after clicking
+                    await page.screenshot(path=f"screenshots/debug_options_{email}.png")
+
+                    # Take screenshot after clicking "Try another way"
+                    await page.screenshot(path=f"screenshots/after_try_another_way_{email}.png")
+
+                    # Debug: Look for all clickable elements that might be backup code options
+                    print(f"  🔍 Looking for backup code option elements...")
+
+                    # Try multiple selectors for backup code option
+                    backup_option_selectors = [
+                        GMAIL_BACKUP_CODE_OPTION,  # "li[data-value='backupCode']"
+                        "[data-value='backupCode']",
+                        "[data-challengetype='backupCode']",
+                        "li:contains('Backup codes')",
+                        "div:contains('Backup codes')",
+                        "button:contains('Backup codes')",
+                        "[role='button']:contains('Backup codes')",
+                        "[role='option']:contains('Backup codes')"
+                    ]
+
+                    backup_option_found = False
+                    clicked_element = None
+
+                    for selector in backup_option_selectors:
+                        try:
+                            if ":contains(" in selector:
+                                # Text-based selector
+                                text = selector.split(":contains('")[1].rstrip("')")
+                                count = await page.get_by_text(text).count()
+                                print(f"  📊 Text selector '{selector}': {count}")
+                                if count > 0:
+                                    print(f"  ✅ Found backup code option with text selector: {selector}")
+                                    await page.get_by_text(text).first.click()
+                                    backup_option_found = True
+                                    clicked_element = f"text: {text}"
+                                    break
+                            else:
+                                # CSS selector
+                                count = await page.locator(selector).count()
+                                print(f"  📊 CSS selector '{selector}': {count}")
+                                if count > 0:
+                                    print(f"  ✅ Found backup code option with CSS selector: {selector}")
+                                    await page.locator(selector).first.click()
+                                    backup_option_found = True
+                                    clicked_element = f"css: {selector}"
+                                    break
+                        except Exception as e:
+                            print(f"  ⚠️ Error with selector {selector}: {e}")
+
+                    if not backup_option_found:
+                        print(f"  ❌ No backup code option found with any selector")
+                        print(f"  � Available clickable elements:")
+
+                        # Debug: Find all clickable elements
+                        clickable_selectors = [
+                            "button",
+                            "[role='button']",
+                            "a",
+                            "[role='link']",
+                            "li",
+                            "[role='option']"
+                        ]
+
+                        for clickable in clickable_selectors:
+                            try:
+                                elements = await page.locator(clickable).all()
+                                if len(elements) > 0:
+                                    print(f"  � {len(elements)} {clickable} elements found")
+                                    for i, elem in enumerate(elements[:5]):  # Show first 5
+                                        try:
+                                            text = await elem.text_content()
+                                            if text and text.strip():
+                                                print(f"    {i+1}. {clickable}: '{text.strip()}'")
+                                        except:
+                                            pass
+                            except:
+                                pass
+
+                        await page.screenshot(path=f"screenshots/no_backup_option_found_{email}.png")
+                        return False
+
+                    print(f"  ✅ Clicked backup code option using: {clicked_element}")
+                    print(f"  ⏳ Waiting for backup code input page to load...")
+                    await page.wait_for_timeout(3000)  # Increased wait time
+
+                    # Take screenshot after clicking backup code option
+                    await page.screenshot(path=f"screenshots/after_backup_option_click_{email}.png")
+
+                    # Check current URL after clicking
+                    current_url = page.url
+                    print(f"  📍 URL after clicking backup code option: {current_url}")
+
+                    # Check if the page actually changed (we should no longer see "Try another way")
+                    try_another_way_after_click = await page.get_by_text(GMAIL_TRY_ANOTHER_WAY_TEXT).count()
+                    print(f"  📊 'Try another way' still visible after click: {try_another_way_after_click}")
+
+                    if try_another_way_after_click > 0:
+                        print(f"  ℹ️ 'Try another way' still visible - this is normal when backup code page loads")
+                    # Take screenshot for debugging but don't fail
+                    await page.screenshot(path=f"screenshots/backup_option_clicked_{email}.png")
+
+                    # Try different selectors for backup code input (be more specific)
+                    backup_selectors = [
+                        GMAIL_BACKUP_CODE_INPUT,  # "input[type='tel'][aria-label='Enter a backup code']" - PRIMARY
+                        GMAIL_BACKUP_CODE_INPUT_ALT1,  # "input[id='backupCodePin']" - BACKUP
+                        GMAIL_BACKUP_CODE_INPUT_ALT2,  # "input[name='Pin']" - BACKUP
+                        GMAIL_BACKUP_CODE_INPUT_ALT3,  # "input[aria-label='Enter a backup code']" - BACKUP
+                        GMAIL_BACKUP_CODE_INPUT_ALT4,  # "input[type='tel']" - FALLBACK
+                        "input[type='password']",  # Sometimes backup codes use password field
+                        "input[placeholder*='backup']",
+                        "input[placeholder*='code']",
+                        "input[name*='backup']",
+                        "input[name*='code']",
+                        "input[id*='backup']",
+                        "input[id*='code']",
+                        "input[aria-label*='backup']",
+                        "input[aria-label*='code']",
+                        "input[data-initial-value]",  # Gmail sometimes uses this
+                        "input[type='text']:not([type='hidden'])",  # Explicit text inputs only
+                        "input:not([type='hidden']):not([type='tel']):not([type='checkbox']):not([type='radio']):not([type='submit']):not([type='button'])"  # Last resort, exclude more types
+                    ]
+
+                    print(f"  🔍 Looking for backup code input field...")
+                    print(f"  📋 Will try {len(backup_selectors)} different selectors")
+                    
+                    # DEBUG: List all input fields on the page for analysis
+                    print(f"  🔧 DEBUG: Analyzing all input fields on backup code page...")
+                    all_inputs = await page.locator("input").all()
+                    print(f"  📊 Total input fields found: {len(all_inputs)}")
+                    
+                    for i, inp in enumerate(all_inputs):
+                        input_type = await inp.get_attribute("type") or "text"
+                        input_id = await inp.get_attribute("id") or ""
+                        input_name = await inp.get_attribute("name") or ""
+                        input_placeholder = await inp.get_attribute("placeholder") or ""
+                        input_class = await inp.get_attribute("class") or ""
+                        input_aria_label = await inp.get_attribute("aria-label") or ""
+                        input_data_value = await inp.get_attribute("data-initial-value") or ""
+                        is_visible = await inp.is_visible()
+                        is_enabled = await inp.is_enabled()
+                        
+                        print(f"  🔍 Input {i}: type='{input_type}' id='{input_id}' name='{input_name}' placeholder='{input_placeholder}'")
+                        print(f"      class='{input_class}' aria-label='{input_aria_label}' data-initial-value='{input_data_value}'")
+                        print(f"      visible={is_visible} enabled={is_enabled}")
+                    
+                    # Take a detailed screenshot for manual inspection
+                    await page.screenshot(path=f"screenshots/backup_page_analysis_{email}.png")
+                    print(f"  📸 Screenshot saved: screenshots/backup_page_analysis_{email}.png")
+                    
+                    backup_input = None
+                    for selector in backup_selectors:
+                        count = await page.locator(selector).count()
+                        print(f"  📊 Selector '{selector}': {count} elements found")
+                        if count > 0:
+                            print(f"  ✅ Found input with selector '{selector}': {count}")
+                            candidate_input = page.locator(selector).first
+
+                            # Validate the candidate input
+                            input_type = await candidate_input.get_attribute("type")
+                            input_tag = await candidate_input.evaluate("el => el.tagName")
+
+                            if input_type in ["checkbox", "radio", "submit", "button"]:
+                                print(f"  ⚠️ Skipping {input_type} input - not fillable")
+                                continue
+                            elif input_tag != "INPUT":
+                                print(f"  ⚠️ Skipping {input_tag} element - not an input")
+                                continue
+                            else:
+                                is_visible = await candidate_input.is_visible()
+                                is_enabled = await candidate_input.is_enabled()
+
+                                if is_visible and is_enabled:
+                                    backup_input = candidate_input
+                                    print(f"  ✅ Selected valid backup input with selector: {selector}")
+
+                                    # 🎯 DIRECT BACKUP CODE ENTRY - Enter immediately after finding valid input
+                                    if backup_code and selector == GMAIL_BACKUP_CODE_INPUT:
+                                        print(f"  🎯 DIRECT ENTRY: Found primary selector, entering backup code immediately!")
+                                        print(f"  🔑 Entering backup code: {backup_code}")
+
+                                        try:
+                                            await backup_input.focus()
+                                            await page.wait_for_timeout(300)
+                                            await backup_input.clear()
+                                            await page.wait_for_timeout(200)
+
+                                            # Type each character with small delay
+                                            for char in backup_code:
+                                                await backup_input.type(char)
+                                                await page.wait_for_timeout(100)
+
+                                            await page.wait_for_timeout(500)
+                                            print(f"  ✅ Backup code entered, pressing Enter...")
+                                            await page.keyboard.press("Enter")
+                                            await page.wait_for_timeout(3000)
+
+                                            # Check if login successful
+                                            current_url = page.url
+                                            print(f"  📍 URL after backup code: {current_url}")
+
+                                            if "mail.google.com" in current_url:
+                                                print(f"  ✅ Successfully logged in with backup code!")
+                                                await self.save_cookies(email, context)
+                                                return True
+                                            elif "myaccount.google.com" in current_url:
+                                                print(f"  🔄 Redirected to account page, navigating to Gmail...")
+                                                await page.goto("https://mail.google.com")
+                                                await page.wait_for_timeout(3000)
+                                                if "mail.google.com" in page.url:
+                                                    print(f"  ✅ Successfully navigated to Gmail!")
+                                                    await self.save_cookies(email, context)
+                                                    return True
+
+                                            # Take screenshot for debugging
+                                            await page.screenshot(path=f"screenshots/backup_code_entered_{email}.png")
+
+                                        except Exception as e:
+                                            print(f"  ❌ Error entering backup code: {e}")
+                                            await page.screenshot(path=f"screenshots/backup_code_error_{email}.png")
+                                            return False
+
+                                    break
+                                else:
+                                    print(f"  ⚠️ Input not visible/enabled - trying next selector")
+                                    continue
+
+                        # If no valid input found with specific selectors, try a broader search
+                        if not backup_input:
+                            print(f"  🔄 No valid backup input found with specific selectors - trying broader search")
+                            all_text_inputs = await page.locator("input[type='text'], input[type='password'], input:not([type])").all()
+
+                            for i, input_elem in enumerate(all_text_inputs):
+                                input_type = await input_elem.get_attribute("type") or "text"
+                                input_placeholder = await input_elem.get_attribute("placeholder") or ""
+                                input_name = await input_elem.get_attribute("name") or ""
+
+                                print(f"  Checking input {i}: type={input_type}, placeholder='{input_placeholder}', name='{input_name}'")
+
+                                if input_type in ["text", "password", ""]:
+                                    is_visible = await input_elem.is_visible()
+                                    is_enabled = await input_elem.is_enabled()
+
+                                    if is_visible and is_enabled:
+                                        backup_input = input_elem
+                                        print(f"  ✅ Found valid backup input: type={input_type}, placeholder='{input_placeholder}'")
+                                        break
+
+                        # Check if we ended up on a phone verification page instead of backup code page
+                        if not backup_input:
+                            print(f"  🔍 Checking if this is actually a phone verification page...")
+                            phone_input_count = await page.locator("input[type='tel']").count()
+                            pin_input_count = await page.locator("input[name='Pin']").count()
+                            
+                            print(f"  📊 Phone inputs: {phone_input_count}, PIN inputs: {pin_input_count}")
+                            
+                            # Only consider it phone verification if we have phone inputs AND no backup-related elements
+                            backup_related_elements = await page.locator("input[aria-label='Enter a backup code'], input[id='backupCodePin'], input[name='Pin'][aria-label='Enter a backup code']").count()
+                            print(f"  � Backup-related inputs: {backup_related_elements}")
+                            
+                            if phone_input_count > 0 and pin_input_count > 0 and backup_related_elements == 0:
+                                print(f"  📱 Detected phone verification page after clicking backup code option")
+                                print(f"  ❌ Phone verification required - cannot proceed with backup code")
+                                print(f"  💡 Please complete phone verification manually or use a different account")
+                                await page.screenshot(path=f"screenshots/phone_verification_required_{email}.png")
+                                return False
+                            elif phone_input_count > 0 and backup_related_elements > 0:
+                                print(f"  ℹ️ Found phone input with backup attributes - this is the backup code field, continuing...")
+                            else:
+                                print(f"  ℹ️ Found phone/PIN inputs but also backup-related elements - likely backup code page")
+
+                        if backup_input:
+                            # Validate that we have a proper input field
+                            input_type = await backup_input.get_attribute("type")
+                            input_tag = await backup_input.evaluate("el => el.tagName")
+                            input_name = await backup_input.get_attribute("name") or ""
+                            input_id = await backup_input.get_attribute("id") or ""
+
+                            print(f"  📝 Selected input - Type: {input_type}, Tag: {input_tag}, Name: '{input_name}', ID: '{input_id}'")
+
+                            # Check if this is actually a fillable input
+                            if input_type in ["checkbox", "radio", "submit", "button"]:
+                                print(f"  ❌ Cannot fill input of type '{input_type}' - looking for another input")
+                                backup_input = None
+                            elif input_tag != "INPUT":
+                                print(f"  ❌ Selected element is not an INPUT tag ({input_tag}) - looking for another input")
+                                backup_input = None
+                            else:
+                                # Get the input element and check if it's visible
+                                is_visible = await backup_input.is_visible()
+                                is_enabled = await backup_input.is_enabled()
+
+                                print(f"  Backup input visible: {is_visible}")
+                                print(f"  Backup input enabled: {is_enabled}")
+
+                                if not is_visible or not is_enabled:
+                                    print(f"  ❌ Backup input not visible/enabled - looking for another input")
+                                    backup_input = None
+
+                        # Check if we ended up on a phone verification page instead of backup code page
+                        # Check if we ended up on a phone verification page instead of backup code page
+                else:
+                    print(f"Backup code option not found for {email}")
+                    # Check for phone verification as fallback
+                    if phone_input_count > 0:
+                        print(f"Phone verification required for {email} (no backup code option found)")
+                        return False
+                    return False
+
+                # Success check for traditional login flow (password + 2FA)
+            print(f"  Checking login success for traditional flow...")
+            await page.wait_for_timeout(3000)
+
+            current_url = page.url
+            print(f"  Current URL: {current_url}")
+
+            # Check if redirected to Google Account page
+            if "myaccount.google.com" in current_url:
+                print(f"  🔄 Redirected to Google Account page, navigating to Gmail...")
+                await page.goto("https://mail.google.com")
+                await page.wait_for_timeout(3000)
+
+                # Check if Gmail loaded successfully
+                gmail_url = page.url
+                if "mail.google.com" in gmail_url:
+                    print(f"  ✅ Successfully navigated to Gmail: {gmail_url}")
+                    await self.save_cookies(email, context)
+                    return True
+                else:
+                    print(f"  ❌ Failed to navigate to Gmail, current URL: {gmail_url}")
+
+            # Check if already on Gmail
+            if "mail.google.com" in current_url:
+                print(f"  ✅ Already on Gmail: {current_url}")
+                await self.save_cookies(email, context)
+                return True
+
+                # Check for Gmail elements
+                compose_count = await page.locator(GMAIL_COMPOSE_BUTTON).count()
+                if compose_count > 0:
+                    print(f"  ✅ Found compose button - login successful!")
+                    await self.save_cookies(email, context)
+                    return True
+                # Device approval flow: email -> approve on phone -> continue
+                print(f"  → Device approval flow detected")
+                print(f"  ⏳ Waiting for device approval... (you can approve on your phone now)")
+
+                # Wait for approval and automatic redirect to Gmail
+                max_wait_time = 120000  # 2 minutes for user to approve
+                wait_interval = 2000   # Check every 2 seconds
+                elapsed = 0
+
+                while elapsed < max_wait_time:
+                    try:
+                        current_url = page.url
+
+                        # Check if we've been automatically redirected to Gmail (approval successful)
+                        if "mail.google.com" in current_url:
+                            print(f"  ✅ Auto-detected Gmail redirect - approval successful!")
+                            print(f"  📍 Current URL: {current_url}")
+                            await self.save_cookies(email, context)
+                            return True
+
+                        # Check for Gmail-specific elements that appear after login
+                        gmail_indicators = [
+                            GMAIL_COMPOSE_BUTTON,  # Compose button
+                            "[role='main']",  # Main Gmail content area
+                            "[data-message-store]",  # Gmail message store
+                            "[aria-label*='Inbox']",  # Inbox aria label
+                            "text=/Inbox/i",  # Inbox text
+                        ]
+
+                        for indicator in gmail_indicators:
+                            try:
+                                if "text=" in indicator:
+                                    text = indicator.replace("text=", "").replace("/i", "")
+                                    count = await page.get_by_text(text).count()
+                                else:
+                                    count = await page.locator(indicator).count()
+
+                                if count > 0:
+                                    print(f"  ✅ Found Gmail element: {indicator} ({count})")
+                                    print(f"  💾 Saving cookies for {email}")
+                                    await self.save_cookies(email, context)
+                                    return True
+                            except:
+                                pass
+
+                        # Check for continue/next buttons (in case approval happened but redirect didn't)
+                        continue_buttons = [
+                            GMAIL_CONTINUE_BUTTON,
+                            GMAIL_NEXT_BUTTON_ALT,
+                            "button[data-primary-action-label*='Continue']",
+                            "button[data-primary-action-label*='Next']",
+                            "[role='button']:contains('Continue')",
+                            "[role='button']:contains('Next')"
+                        ]
+
+                        for button_selector in continue_buttons:
+                            try:
+                                if ":contains(" in button_selector:
+                                    text = button_selector.split(":contains('")[1].rstrip("')")
+                                    count = await page.get_by_text(text).count()
+                                else:
+                                    count = await page.locator(button_selector).count()
+
+                                if count > 0:
+                                    print(f"  ✅ Found continue button, clicking: '{button_selector}'")
+                                    if ":contains(" in button_selector:
+                                        text = button_selector.split(":contains('")[1].rstrip("')")
+                                        await page.get_by_text(text).click()
+                                    else:
+                                        await page.locator(button_selector).first.click()
+
+                                    await page.wait_for_timeout(3000)
+                                    break
+                            except:
+                                pass
+
+                        await page.wait_for_timeout(wait_interval)
+                        elapsed += wait_interval
+
+                        # Progress indicator every 10 seconds
+                        if elapsed % 10000 == 0:
+                            print(f"  ⏳ Still waiting for approval... ({elapsed//1000}s)")
+
+                    except Exception as e:
+                        print(f"  Error during approval wait: {e}")
+                        break
+
+                if elapsed >= max_wait_time:
+                    print(f"  ❌ Timeout waiting for device approval (2 minutes)")
+                    await page.screenshot(path=f"screenshots/debug_approval_timeout_{email}.png")
+                    return False
+
+            else:
+                # Unknown login flow
+                print(f"  ❌ Unknown login flow - neither password nor device approval detected")
+                await page.screenshot(path=f"screenshots/debug_unknown_flow_{email}.png")
+                return False
+
+        except Exception as e:
+            print(f"Login error for {email}: {e}")
+            return False
+        finally:
+            await page.close()
+
+    async def check_session_validity(self, email: str) -> bool:
+        """Check if the session is still valid by verifying Gmail access"""
+        if email not in self.contexts:
+            return False
+
+        context = self.contexts[email]
+
+        # Get existing pages in the context
+        pages = context.pages
+        if not pages:
+            return False
+
+        # Use the first available page to check session
+        page = pages[0]
+
+        try:
+            # Navigate to Gmail to check if we have valid access
+            print(f"  🔍 Checking Gmail access for session validation...")
+            await page.goto("https://mail.google.com")
+            await page.wait_for_timeout(3000)
+
+            current_url = page.url
+            if "mail.google.com" not in current_url:
+                print(f"  ❌ Not on Gmail - session invalid (URL: {current_url})")
+                return False
+
+            # Check for Gmail-specific elements to confirm interface is loaded
+            compose_selectors = [
+                GMAIL_COMPOSE_BUTTON,
+                GMAIL_COMPOSE_BUTTON_ALT1,
+                GMAIL_COMPOSE_BUTTON_ALT2,
+                GMAIL_COMPOSE_BUTTON_ALT3
+            ]
+
+            compose_found = False
+            for selector in compose_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        compose_found = True
+                        print(f"  ✅ Found compose button: {selector}")
+                        break
+                except:
+                    pass
+
+            if compose_found:
+                print(f"  ✅ Session valid - Gmail interface accessible")
+                return True
+
+            # Check for other Gmail indicators if compose button not found
+            gmail_indicators = [
+                "[data-message-store]",
+                "[role='main']",
+                "text=/Inbox/i",
+                "[aria-label*='Inbox']"
+            ]
+
+            for indicator in gmail_indicators:
+                try:
+                    if "text=" in indicator:
+                        text = indicator.replace("text=", "").replace("/i", "")
+                        count = await page.get_by_text(text).count()
+                    else:
+                        count = await page.locator(indicator).count()
+
+                    if count > 0:
+                        print(f"  ✅ Session valid - found Gmail indicator: {indicator}")
+                        return True
+                except:
+                    pass
+
+            print(f"  ❌ Session invalid - Gmail interface not accessible")
+            return False
+
+        except Exception as e:
+            print(f"  ❌ Session validity check error for {email}: {e}")
+            return False
+
+    async def send_email(self, email: str, to: str, subject: str, body: str) -> bool:
+        if email not in self.contexts:
+            print(f"No active session for {email}")
+            return False
+
+        context = self.contexts[email]
+
+        # First, check if we have an existing valid session
+        print(f"📧 Checking existing session for {email}...")
+        session_valid = await self.check_session_validity(email)
+
+        if session_valid:
+            print(f"✅ Using existing valid session")
+            # Use existing page from context
+            pages = context.pages
+            if pages:
+                page = pages[0]
+            else:
+                page = await context.new_page()
+        else:
+            print(f"🔄 Creating new page for {email}")
+            page = await context.new_page()
+
+        try:
+            print(f"📧 Starting email send process for {email}")
+            print(f"   To: {to}")
+            print(f"   Subject: {subject}")
+
+            # Step 1: Navigate to Gmail (only if session is not valid)
+            if not session_valid:
+                print(f"   Step 1: Navigating to Gmail...")
+                await page.goto("https://mail.google.com")
+                await page.wait_for_timeout(3000)  # Wait for page to load
+                await page.screenshot(path=f"screenshots/send_email_step1_navigate_{email}.png")
+            else:
+                print(f"   Step 1: Already on Gmail, skipping navigation")
+
+            # Step 2: Wait for Gmail to fully load and find compose button
+            print(f"   Step 2: Waiting for Gmail to load...")
+            max_wait_time = 30000  # 30 seconds
+            wait_interval = 1000   # Check every 1 second
+            elapsed = 0
+            compose_found = False
+
+            while elapsed < max_wait_time and not compose_found:
+                try:
+                    # Check multiple compose button selectors
+                    compose_selectors = [
+                        GMAIL_COMPOSE_BUTTON,  # Primary selector
+                        "[role='button'][aria-label*='Compose']",
+                        "[role='button'][data-tooltip*='Compose']",
+                        "div[role='button']:has-text('Compose')",
+                        "[gh='cm']",  # Gmail's internal compose button class
+                        "button:contains('Compose')",
+                        "[aria-label='Compose']",
+                        "[data-tooltip='Compose']"
+                    ]
+
+                    for selector in compose_selectors:
+                        try:
+                            if ":contains(" in selector:
+                                text = selector.split(":contains('")[1].rstrip("')")
+                                count = await page.get_by_text(text).count()
+                            else:
+                                count = await page.locator(selector).count()
+
+                            if count > 0:
+                                print(f"   ✅ Found compose button with selector: {selector} ({count})")
+                                compose_found = True
+
+                                # Get the element for clicking
+                                if ":contains(" in selector:
+                                    compose_button = page.get_by_text(text).first
+                                else:
+                                    compose_button = page.locator(selector).first
+
+                                # Check if it's visible and enabled
+                                is_visible = await compose_button.is_visible()
+                                is_enabled = await compose_button.is_enabled()
+
+                                print(f"      Visible: {is_visible}, Enabled: {is_enabled}")
+
+                                if is_visible and is_enabled:
+                                    print(f"   Step 3: Clicking compose button...")
+                                    await compose_button.click()
+                                    await page.screenshot(path=f"screenshots/send_email_step3_compose_clicked_{email}.png")
+                                    break
+                                else:
+                                    print(f"      Compose button not ready, waiting...")
+                        except Exception as e:
+                            print(f"      Error checking selector {selector}: {e}")
+
+                    if not compose_found:
+                        await page.wait_for_timeout(wait_interval)
+                        elapsed += wait_interval
+
+                        if elapsed % 5000 == 0:  # Progress every 5 seconds
+                            print(f"      Still waiting for compose button... ({elapsed//1000}s)")
+                            await page.screenshot(path=f"screenshots/send_email_waiting_{elapsed//1000}s_{email}.png")
+
+                except Exception as e:
+                    print(f"   Error during compose button wait: {e}")
+                    break
+
+            if not compose_found:
+                print(f"   ❌ Compose button not found within {max_wait_time//1000} seconds")
+                await page.screenshot(path=f"screenshots/send_email_compose_timeout_{email}.png")
+                return False
+
+            # Step 4: Wait for compose window to appear
+            print(f"   Step 4: Waiting for compose window...")
+            await page.wait_for_timeout(2000)  # Give time for compose window to open
+
+            # Take screenshot of compose window
+            await page.screenshot(path=f"screenshots/send_email_step4_compose_window_{email}.png")
+
+            # Step 5: Find and fill TO field
+            print(f"   Step 5: Finding TO field...")
+            to_selectors = [
+                GMAIL_TO_INPUT,  # Primary selector
+                "input[aria-label='To']",
+                "input[aria-label='To recipients']",
+                "input[placeholder*='To']",
+                "input[name='to']",
+                "textarea[aria-label='To']",
+                "div[aria-label='To'] input",
+                "div[data-tooltip='Recipients'] input"
+            ]
+
+            to_field = None
+            for selector in to_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        print(f"   ✅ Found TO field with selector: {selector} ({count})")
+                        to_field = page.locator(selector).first
+                        break
+                except Exception as e:
+                    print(f"      Error checking TO selector {selector}: {e}")
+
+            if not to_field:
+                print(f"   ❌ TO field not found")
+                await page.screenshot(path=f"screenshots/send_email_to_field_missing_{email}.png")
+                return False
+
+            # Check if TO field is ready
+            is_visible = await to_field.is_visible()
+            is_enabled = await to_field.is_enabled()
+            print(f"      TO field visible: {is_visible}, enabled: {is_enabled}")
+
+            if is_visible and is_enabled:
+                print(f"   Filling TO field with: {to}")
+                await to_field.clear()
+                await to_field.fill(to)
+                await page.wait_for_timeout(500)
+                await page.screenshot(path=f"screenshots/send_email_step5_to_filled_{email}.png")
+            else:
+                print(f"   ❌ TO field not ready")
+                return False
+
+            # Step 6: Find and fill SUBJECT field
+            print(f"   Step 6: Finding SUBJECT field...")
+            subject_selectors = [
+                GMAIL_SUBJECT_INPUT,  # Primary selector
+                "input[aria-label='Subject']",
+                "input[placeholder*='Subject']",
+                "input[name='subject']",
+                "input[name='subjectbox']"
+            ]
+
+            subject_field = None
+            for selector in subject_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        print(f"   ✅ Found SUBJECT field with selector: {selector} ({count})")
+                        subject_field = page.locator(selector).first
+                        break
+                except Exception as e:
+                    print(f"      Error checking SUBJECT selector {selector}: {e}")
+
+            if subject_field:
+                is_visible = await subject_field.is_visible()
+                is_enabled = await subject_field.is_enabled()
+                print(f"      SUBJECT field visible: {is_visible}, enabled: {is_enabled}")
+
+                if is_visible and is_enabled:
+                    print(f"   Filling SUBJECT field with: {subject}")
+                    await subject_field.clear()
+                    await subject_field.fill(subject)
+                    await page.wait_for_timeout(500)
+                    await page.screenshot(path=f"screenshots/send_email_step6_subject_filled_{email}.png")
+
+            # Step 7: Find and fill BODY field
+            print(f"   Step 7: Finding BODY field...")
+            body_selectors = [
+                GMAIL_BODY_INPUT,  # Primary selector
+                "div[aria-label='Message Body']",
+                "div[aria-label='Message body']",
+                "div[role='textbox']",
+                "div[contenteditable='true']",
+                "div[data-tooltip='Message body']",
+                "[aria-label*='Message']",
+                "[aria-label*='Body']"
+            ]
+
+            body_field = None
+            for selector in body_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        print(f"   ✅ Found BODY field with selector: {selector} ({count})")
+                        body_field = page.locator(selector).first
+                        break
+                except Exception as e:
+                    print(f"      Error checking BODY selector {selector}: {e}")
+
+            if not body_field:
+                print(f"   ❌ BODY field not found")
+                await page.screenshot(path=f"screenshots/send_email_body_field_missing_{email}.png")
+                return False
+
+            # Check if BODY field is ready
+            is_visible = await body_field.is_visible()
+            is_enabled = await body_field.is_enabled()
+            print(f"      BODY field visible: {is_visible}, enabled: {is_enabled}")
+
+            if is_visible and is_enabled:
+                print(f"   Filling BODY field with: {body[:50]}...")
+                await body_field.clear()
+                await body_field.fill(body)
+                await page.wait_for_timeout(500)
+                await page.screenshot(path=f"screenshots/send_email_step7_body_filled_{email}.png")
+            else:
+                print(f"   ❌ BODY field not ready")
+                return False
+
+            # Step 8: Find and click SEND button
+            print(f"   Step 8: Finding SEND button...")
+            send_selectors = [
+                GMAIL_SEND_BUTTON,  # Primary selector
+                "div[role='button'][aria-label*='Send']",
+                "div[role='button'][data-tooltip*='Send']",
+                "button:contains('Send')",
+                "[aria-label='Send']",
+                "[data-tooltip='Send']",
+                "[gh='sd']"  # Gmail's internal send button class
+            ]
+
+            send_button = None
+            for selector in send_selectors:
+                try:
+                    if ":contains(" in selector:
+                        text = selector.split(":contains('")[1].rstrip("')")
+                        count = await page.get_by_text(text).count()
+                    else:
+                        count = await page.locator(selector).count()
+
+                    if count > 0:
+                        print(f"   ✅ Found SEND button with selector: {selector} ({count})")
+                        if ":contains(" in selector:
+                            send_button = page.get_by_text(text).first
+                        else:
+                            send_button = page.locator(selector).first
+                        break
+                except Exception as e:
+                    print(f"      Error checking SEND selector {selector}: {e}")
+
+            if not send_button:
+                print(f"   ❌ SEND button not found")
+                await page.screenshot(path=f"screenshots/send_email_send_button_missing_{email}.png")
+                return False
+
+            # Check if SEND button is ready
+            is_visible = await send_button.is_visible()
+            is_enabled = await send_button.is_enabled()
+            print(f"      SEND button visible: {is_visible}, enabled: {is_enabled}")
+
+            if is_visible and is_enabled:
+                print(f"   Clicking SEND button...")
+                await send_button.click()
+                await page.wait_for_timeout(2000)  # Wait for send to process
+                await page.screenshot(path=f"screenshots/send_email_step8_sent_{email}.png")
+                print(f"   ✅ Email sent successfully!")
+                return True
+            else:
+                print(f"   ❌ SEND button not ready")
+                await page.screenshot(path=f"screenshots/send_email_send_button_not_ready_{email}.png")
+                return False
+
+        except Exception as e:
+            print(f"Send email error for {email}: {e}")
+            await page.screenshot(path=f"screenshots/send_email_error_{email}.png")
+            return False
+        finally:
+            # Only close the page if we created a new one (not reusing existing session)
+            if not session_valid:
+                await page.close()
+
+    def get_sms_number(self, service: str = "google") -> Optional[str]:
+        if not SMS_API_KEY:
+            return None
+
+        params = {
+            "metod": "getnumber",
+            "service": service,
+            "apikey": SMS_API_KEY
+        }
+        response = requests.get(SMS_API_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("response") == "1":
+                return data.get("number")
+        return None
+
+    def get_sms_code(self, number_id: str) -> Optional[str]:
+        if not SMS_API_KEY:
+            return None
+
+        params = {
+            "metod": "getsms",
+            "id": number_id,
+            "apikey": SMS_API_KEY
+        }
+        response = requests.get(SMS_API_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("response") == "1":
+                return data.get("sms")
+        return None
