@@ -51,7 +51,8 @@ class GmailAutomation:
                     "--disable-web-security",  # Disable web security
                     "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",  # Firefox user agent
                     "--accept-lang=en-US,en",  # Set language
-                    "--disable-extensions",  # Disable extensions
+                    # Allow extensions for FoxyProxy to work
+                    # "--disable-extensions",  # Commented out to allow FoxyProxy
                     "--disable-plugins",  # Disable plugins
                     "--disable-images",  # Disable images for speed
                 ]
@@ -87,11 +88,36 @@ class GmailAutomation:
             await context.close()
         if self.browser:
             await self.browser.close()
+        # Close Firefox browser if it exists
+        if hasattr(self, 'firefox_browser') and self.firefox_browser:
+            await self.firefox_browser.close()
         if self.playwright:
             await self.playwright.stop()
 
     def get_cookie_path(self, email: str) -> Path:
         return self.cookies_dir / f"{email.replace('@', '_').replace('.', '_')}.json"
+
+    async def close_context(self, email: str):
+        """Close a specific browser context for an email and any proxy-specific contexts"""
+        contexts_to_close = []
+        
+        # Find the main context for this email
+        if email in self.contexts:
+            contexts_to_close.append(email)
+        
+        # Find any proxy-specific contexts for this email
+        for context_key in list(self.contexts.keys()):
+            if context_key.startswith(f"{email}_proxy_"):
+                contexts_to_close.append(context_key)
+        
+        # Close all found contexts
+        for context_key in contexts_to_close:
+            try:
+                await self.contexts[context_key].close()
+                del self.contexts[context_key]
+                print(f"✅ Closed context: {context_key}")
+            except Exception as e:
+                print(f"❌ Error closing context {context_key}: {e}")
 
     async def load_cookies(self, email: str) -> Optional[Dict]:
         cookie_file = self.get_cookie_path(email)
@@ -111,31 +137,66 @@ class GmailAutomation:
             return self.contexts[email]
 
         context_options = {}
-        if proxy and USE_PROXY:
+        browser_type = "chromium"  # Default browser
+
+        # Check if we should use Firefox for FoxyProxy (even without app-level proxy config)
+        if USE_FIREFOX_FOR_SOCKS5:
+            print(f"🦊 Using Firefox browser for FoxyProxy compatibility")
+            if not USE_PROXY:
+                print(f"🛡️ FoxyProxy extension will handle SOCKS5 proxy configuration")
+            browser_type = "firefox"
+
+        # Handle proxy configuration (either global or per-request)
+        if proxy:
             # Determine proxy type based on the proxy configuration
-            proxy_type = proxy.get("type", "socks5")  # Default to socks5 if not specified
+            proxy_type = proxy.get("type", "http")  # Default to http if not specified
 
             print(f"🔧 Configuring {proxy_type.upper()} proxy: {proxy['host']}:{proxy['port']}")
             print(f"👤 Username: {proxy.get('username', 'None')}")
 
             if proxy_type.lower() == "socks5":
-                # For SOCKS5, we'll use a different approach since Chromium doesn't support SOCKS5 auth
-                print(f"⚠️  Chromium doesn't support SOCKS5 proxy authentication")
-                print(f"💡 Consider using HTTP proxy instead, or use Firefox browser")
-                print(f"🔄 Falling back to direct connection (no proxy)")
+                if USE_FIREFOX_FOR_SOCKS5:
+                    print(f"🦊 Using Firefox for SOCKS5 proxy (DNS protection enabled)")
+                    browser_type = "firefox"
 
-                # Don't set proxy for SOCKS5 - let it fall through to no proxy
-                pass
-            else:
+                    # Check if proxy has authentication
+                    if proxy.get("username") and proxy.get("password"):
+                        print(f"⚠️  SOCKS5 proxy with authentication detected")
+                        print(f"⚠️  Playwright Firefox doesn't support SOCKS5 authentication")
+                        print(f"💡 Consider using HTTP proxy instead or configure proxy externally")
+
+                        # For now, try without authentication in context options
+                        context_options["proxy"] = {
+                            "server": f"socks5://{proxy['host']}:{proxy['port']}"
+                        }
+                    else:
+                        # No authentication - this should work
+                        context_options["proxy"] = {
+                            "server": f"socks5://{proxy['host']}:{proxy['port']}"
+                        }
+
+                    print(f"🛡️  DNS protection enabled for SOCKS5 proxy")
+                    print(f"🌐 Firefox proxy configuration: {context_options['proxy']}")
+                else:
+                    print(f"⚠️  SOCKS5 proxy requested but USE_FIREFOX_FOR_SOCKS5=False")
+                    print(f"💡 To use SOCKS5 proxies, set USE_FIREFOX_FOR_SOCKS5=true in .env")
+                    print(f"🔄 Falling back to direct connection (no proxy)")
+            elif proxy_type.lower() == "http":
+                # HTTP/HTTPS proxy - works with Chromium
+                print(f"🌐 Using HTTP proxy with Chromium browser")
+                browser_type = "chromium"  # Ensure we use Chromium for HTTP proxies
+
+                # Configure HTTP proxy for Playwright
                 server_url = f"http://{proxy['host']}:{proxy['port']}"
-
                 context_options["proxy"] = {
                     "server": server_url,
                     "username": proxy.get("username"),
                     "password": proxy.get("password")
                 }
-
-            print(f"🌐 Proxy configuration: {context_options['proxy']}")
+                print(f"🌐 HTTP proxy configuration: {context_options['proxy']}")
+            else:
+                print(f"⚠️  Unknown proxy type: {proxy_type}")
+                print(f"🔄 Falling back to direct connection (no proxy)")
 
             # Test proxy connectivity (simple TCP connection test)
             import socket
@@ -151,22 +212,78 @@ class GmailAutomation:
                     print(f"⚠️  Proxy server is not reachable: {proxy['host']}:{proxy['port']}")
             except Exception as e:
                 print(f"⚠️  Could not test proxy connectivity: {e}")
-        elif proxy and not USE_PROXY:
-            print(f"🚫 Proxy disabled in configuration (USE_PROXY=False)")
+        elif USE_PROXY:
+            print(f"⚠️  Global proxy enabled but no proxy configuration provided")
+            print(f"💡 Either disable USE_PROXY or provide proxy configuration")
         else:
             print(f"🌐 No proxy configuration provided - using direct connection")
 
         try:
-            context = await self.browser.new_context(**context_options)
-            print(f"✅ Browser context created successfully with proxy")
+            # Create browser instance based on type
+            if browser_type == "firefox":
+                if not hasattr(self, 'firefox_browser') or self.firefox_browser is None:
+                    print(f"🦊 Launching Firefox browser for SOCKS5 proxy support...")
+
+                    # Prepare Firefox launch arguments
+                    firefox_args = [
+                        "--disable-extensions",
+                        "--disable-default-apps",
+                        "--disable-sync",
+                        "--disable-translate",
+                        "--hide-scrollbars",
+                        "--metrics-recording-only",
+                        "--mute-audio",
+                        "--no-first-run",
+                        "--safebrowsing-disable-auto-update"
+                    ]
+
+                    # Add proxy arguments if proxy is configured
+                    if proxy and proxy_type.lower() == "socks5":
+                        if proxy.get("username") and proxy.get("password"):
+                            print(f"⚠️  SOCKS5 with authentication - using system proxy method")
+                            print(f"💡 For authenticated SOCKS5, consider using HTTP proxy or external proxy configuration")
+                            # For authenticated SOCKS5, we'll try environment variables
+                            import os
+                            os.environ['http_proxy'] = f"socks5://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+                            os.environ['https_proxy'] = f"socks5://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+                        else:
+                            # No authentication - use command line args
+                            firefox_args.extend([
+                                f"--proxy-server=socks5://{proxy['host']}:{proxy['port']}",
+                                "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE " + proxy['host'],
+                                "--proxy-bypass-list=<loopback>"
+                            ])
+
+                    self.firefox_browser = await self.playwright.firefox.launch(
+                        headless=BROWSER_HEADLESS,
+                        args=firefox_args
+                    )
+                context = await self.firefox_browser.new_context(**context_options)
+                print(f"✅ Firefox browser context created successfully with SOCKS5 proxy")
+            else:
+                context = await self.browser.new_context(**context_options)
+                print(f"✅ Browser context created successfully")
+
         except Exception as proxy_error:
             print(f"❌ Failed to create context with proxy: {proxy_error}")
+
+            # Provide specific guidance for SOCKS5 authentication issues
+            if proxy and proxy.get("type", "").lower() == "socks5" and proxy.get("username"):
+                print(f"💡 SOCKS5 Authentication Issue Detected!")
+                print(f"🔧 Solutions:")
+                print(f"   1. Use HTTP proxy instead of SOCKS5")
+                print(f"   2. Configure proxy externally (system settings)")
+                print(f"   3. Use proxy extension like FoxyProxy")
+                print(f"   4. Convert SOCKS5 to HTTP using a proxy wrapper")
 
             # Fallback: Try without proxy
             print(f"🔄 Attempting to create context without proxy...")
             fallback_options = {k: v for k, v in context_options.items() if k != "proxy"}
             try:
-                context = await self.browser.new_context(**fallback_options)
+                if browser_type == "firefox" and hasattr(self, 'firefox_browser'):
+                    context = await self.firefox_browser.new_context(**fallback_options)
+                else:
+                    context = await self.browser.new_context(**fallback_options)
                 print(f"✅ Browser context created successfully without proxy (fallback)")
             except Exception as fallback_error:
                 print(f"❌ Failed to create context even without proxy: {fallback_error}")
@@ -1325,12 +1442,18 @@ class GmailAutomation:
             print(f"  ❌ Session validity check error for {email}: {e}")
             return False
 
-    async def send_email(self, email: str, to: str, subject: str, body: str) -> bool:
-        if email not in self.contexts:
+    async def send_email(self, email: str, to: str, subject: str, body: str, proxy: Optional[Dict] = None) -> bool:
+        # If a proxy is specified, create a new context with that proxy
+        # Otherwise, use the existing context for this email
+        if proxy:
+            print(f"🔄 Creating new context with proxy for {email}")
+            print(f"   Proxy: {proxy['host']}:{proxy['port']} (user: {proxy.get('username', 'None')})")
+            context = await self.create_context(f"{email}_proxy_{hash(str(proxy))}", proxy)
+        elif email not in self.contexts:
             print(f"No active session for {email}")
             return False
-
-        context = self.contexts[email]
+        else:
+            context = self.contexts[email]
 
         # Use existing page from context if available, otherwise create new one
         pages = context.pages
@@ -1339,7 +1462,7 @@ class GmailAutomation:
             print(f"📧 Using existing page for {email}")
         else:
             page = await context.new_page()
-            print(f"� Created new page for {email}")
+            print(f"📧 Created new page for {email}")
 
         try:
             print(f"📧 Starting email send process for {email}")

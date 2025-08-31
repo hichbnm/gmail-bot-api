@@ -1,0 +1,391 @@
+{
+  "info": {
+    "name": "Gmail API - Complete Collection",
+    "description": "Complete API collection for Gmail automation with login, email sending, and proxy management",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Authentication & Login",
+      "item": [
+        {
+          "name": "Login Single Account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"your-email@gmail.com\",\n      \"email_pass\": \"your-app-password\",\n      \"browser_pass\": \"your-login-password\",\n      \"proxy_host\": \"195.35.113.44\",\n      \"proxy_port\": 8080,\n      \"proxy_user\": \"proxy-username\",\n      \"proxy_pass\": \"proxy-password\",\n      \"backup_code\": \"12345678\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/login_accounts",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "login_accounts"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login Multiple Accounts",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"account1@gmail.com\",\n      \"email_pass\": \"app-password-1\",\n      \"browser_pass\": \"login-password-1\",\n      \"proxy_host\": \"195.35.113.44\",\n      \"proxy_port\": 8080,\n      \"proxy_user\": \"username1\",\n      \"proxy_pass\": \"password1\",\n      \"backup_code\": \"12345678\"\n    },\n    {\n      \"first_from_name\": \"Jane\",\n      \"last_from_name\": \"Smith\",\n      \"email\": \"account2@gmail.com\",\n      \"email_pass\": \"app-password-2\",\n      \"browser_pass\": \"login-password-2\",\n      \"proxy_host\": \"195.35.113.45\",\n      \"proxy_port\": 8080,\n      \"proxy_user\": \"username2\",\n      \"proxy_pass\": \"password2\",\n      \"backup_code\": \"87654321\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/login_accounts",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "login_accounts"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Email Sending",
+      "item": [
+        {
+          "name": "Send Single Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"your-email@gmail.com\",\n      \"email_pass\": \"your-app-password\",\n      \"browser_pass\": \"your-login-password\",\n      \"backup_code\": null\n    }\n  ],\n  \"emails\": [\n    {\n      \"to\": \"recipient@example.com\",\n      \"subject\": \"Test Email\",\n      \"body\": \"This is a test email sent via Gmail API\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/send_emails",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "send_emails"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Multiple Emails",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"account1@gmail.com\",\n      \"email_pass\": \"app-password-1\",\n      \"browser_pass\": \"login-password-1\",\n      \"backup_code\": null\n    },\n    {\n      \"first_from_name\": \"Jane\",\n      \"last_from_name\": \"Smith\",\n      \"email\": \"account2@gmail.com\",\n      \"email_pass\": \"app-password-2\",\n      \"browser_pass\": \"login-password-2\",\n      \"backup_code\": null\n    }\n  ],\n  \"emails\": [\n    {\n      \"to\": \"recipient1@example.com\",\n      \"subject\": \"Email to Recipient 1\",\n      \"body\": \"Hello Recipient 1, this is a test email.\"\n    },\n    {\n      \"to\": \"recipient2@example.com\",\n      \"subject\": \"Email to Recipient 2\",\n      \"body\": \"Hello Recipient 2, this is another test email.\"\n    },\n    {\n      \"to\": \"recipient3@example.com\",\n      \"subject\": \"Email to Recipient 3\",\n      \"body\": \"Hello Recipient 3, this is the third test email.\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/send_emails",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "send_emails"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Email with Manual Proxy",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"your-email@gmail.com\",\n      \"email_pass\": \"your-app-password\",\n      \"browser_pass\": \"your-login-password\",\n      \"proxy_host\": \"195.35.113.44\",\n      \"proxy_port\": 8080,\n      \"proxy_user\": \"proxy-username\",\n      \"proxy_pass\": \"proxy-password\",\n      \"backup_code\": null\n    }\n  ],\n  \"emails\": [\n    {\n      \"to\": \"recipient@example.com\",\n      \"subject\": \"Email with Manual Proxy\",\n      \"body\": \"This email is sent using a manually specified HTTP proxy\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/send_emails",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "send_emails"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Email with Auto Proxy Assignment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accounts\": [\n    {\n      \"first_from_name\": \"John\",\n      \"last_from_name\": \"Doe\",\n      \"email\": \"your-email@gmail.com\",\n      \"email_pass\": \"your-app-password\",\n      \"browser_pass\": \"your-login-password\",\n      \"backup_code\": null\n    }\n  ],\n  \"emails\": [\n    {\n      \"to\": \"recipient@example.com\",\n      \"subject\": \"Email with Auto Proxy\",\n      \"body\": \"This email uses automatically assigned proxy from the pool\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/send_emails",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "send_emails"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Proxy Management",
+      "item": [
+        {
+          "name": "Get Proxy Statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/proxy_stats",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "proxy_stats"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add HTTP Proxy",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"host\": \"195.35.113.44\",\n  \"port\": 8080,\n  \"username\": \"proxy-username\",\n  \"password\": \"proxy-password\",\n  \"type\": \"http\",\n  \"country\": \"US\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/add_proxy",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "add_proxy"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add SOCKS5 Proxy",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"host\": \"195.35.113.44\",\n  \"port\": 4005,\n  \"username\": \"proxy-username\",\n  \"password\": \"proxy-password\",\n  \"type\": \"socks5\",\n  \"country\": \"US\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:8000/add_proxy",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "add_proxy"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove Proxy",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/remove_proxy/proxy_001",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "remove_proxy",
+                "proxy_001"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "File Upload & Processing",
+      "item": [
+        {
+          "name": "Upload Excel Sheet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/octet-stream"
+              }
+            ],
+            "body": {
+              "mode": "binary",
+              "binary": "Binary data for Excel file"
+            },
+            "url": {
+              "raw": "http://localhost:8000/upload_sheet",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "upload_sheet"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "System Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://localhost:8000/health",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "8000",
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "your-email@gmail.com",
+      "type": "string"
+    },
+    {
+      "key": "app_password",
+      "value": "your-app-password",
+      "type": "string"
+    },
+    {
+      "key": "browser_password",
+      "value": "your-login-password",
+      "type": "string"
+    },
+    {
+      "key": "proxy_host",
+      "value": "195.35.113.44",
+      "type": "string"
+    },
+    {
+      "key": "proxy_port",
+      "value": "8080",
+      "type": "string"
+    },
+    {
+      "key": "proxy_username",
+      "value": "proxy-username",
+      "type": "string"
+    },
+    {
+      "key": "proxy_password",
+      "value": "proxy-password",
+      "type": "string"
+    },
+    {
+      "key": "backup_code",
+      "value": "12345678",
+      "type": "string"
+    }
+  ]
+}

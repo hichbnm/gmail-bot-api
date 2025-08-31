@@ -1,0 +1,22 @@
+{
+  "proxies": [
+    {
+      "id": "proxy_002",
+      "host": "195.35.113.45",
+      "port": 8080,
+      "username": "proxyuser2",
+      "password": "proxypass2",
+      "type": "http",
+      "country": "US",
+      "status": "active",
+      "last_used": null,
+      "success_rate": 1.0
+    }
+  ],
+  "account_mapping": {
+    "hichemmoussa6677@gmail.com": "proxy_002",
+    "hichemmoussa189@gmail.com": "proxy_002"
+  },
+  "rotation_strategy": "auto",
+  "max_accounts_per_proxy": 3
+}

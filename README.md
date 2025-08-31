@@ -235,12 +235,83 @@ LOG_MAX_SIZE=10485760  # 10MB
 LOG_BACKUP_COUNT=5
 ```
 
-## Troubleshooting
+## SOCKS5 Proxy Configuration
 
-- **Login Issues**: Ensure BROWSER_PASS is correct (not app password)
-- **2FA**: Provide backup codes or handle manual verification
-- **Performance**: Adjust MAX_CONCURRENT_BROWSERS for your hardware
-- **Selectors**: Update Gmail selectors in config.py if login fails
+The service supports SOCKS5 proxies with Firefox for enhanced privacy and DNS protection:
+
+### Your Current Configuration
+
+- **Proxy Host**: 195.35.113.44
+- **Proxy Port**: 4005
+- **Username**: slpPJ73G3XhC
+- **Password**: J4J0Ai5jUvQE
+- **Email**: hichemmoussa6677@gmail.com
+
+### Firefox + SOCKS5 Setup
+
+1. **Option 1: System-Level Proxy (Recommended)**
+   ```bash
+   # Configure Windows system proxy
+   python setup_system_proxy.py
+
+   # Configure Firefox to use system proxy
+   # Firefox Settings > Network Settings > Use system proxy settings
+
+   # Update .env file
+   USE_PROXY=false
+   USE_FIREFOX_FOR_SOCKS5=false
+   ```
+
+2. **Option 2: Manual Firefox Profile**
+   ```bash
+   # Test with manual Firefox configuration
+   python test_manual_firefox_proxy.py
+   ```
+
+3. **Option 3: Test System Proxy**
+   ```bash
+   # Test Gmail automation with system proxy
+   python test_system_proxy_gmail.py
+   ```
+
+### Quick Test Your Proxy
+
+```bash
+# Test SOCKS5 proxy (may show authentication limitation)
+python test_socks5_proxy.py
+
+# Test HTTP proxy (if supported by your provider)
+python test_http_proxy.py
+
+# Setup system proxy (recommended)
+python setup_system_proxy.py
+
+# Test Gmail with system proxy
+python test_system_proxy_gmail.py
+```
+
+### Security Benefits
+
+- **Anonymous Browsing**: All traffic routed through SOCKS5 proxy
+- **DNS Privacy**: DNS queries never leak to ISP
+- **IP Protection**: Real IP address never exposed
+- **Multi-hop Support**: Can be combined with VPN for extra security
+
+### Firefox-Specific Features
+
+When using Firefox with SOCKS5:
+- Automatic proxy authentication
+- DNS resolution through proxy
+- WebRTC disabled for IP leak prevention
+- Enhanced fingerprinting protection
+- Better SOCKS5 protocol support
+
+### Troubleshooting
+
+- **Connection Issues**: Verify proxy credentials and server status
+- **DNS Leaks**: Check that `USE_FIREFOX_FOR_SOCKS5=true`
+- **Slow Performance**: SOCKS5 may be slower than HTTP proxies
+- **Authentication Errors**: Ensure proxy username/password are correct
 
 ## License
 
