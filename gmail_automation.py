@@ -7,6 +7,15 @@ from typing import Dict, Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 import requests
 
+# Bridge imports
+import threading
+import socketserver
+import http.server
+import socket
+import socks
+import select
+import logging
+
 from config import (
     BROWSER_HEADLESS, COOKIE_STORAGE_PATH, SMS_API_KEY, SMS_API_URL,
     GMAIL_LOGIN_URL, GMAIL_EMAIL_INPUT, GMAIL_PASSWORD_INPUT,
@@ -23,74 +32,204 @@ from config import (
     GMAIL_DEVICE_APPROVED_TEXT, USE_PROXY, USE_FIREFOX_FOR_SOCKS5, SMART_LOGIN_DETECTION
 )
 
+# HTTP-to-SOCKS5 Bridge Handler
+class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    def __init__(self, proxy_host, proxy_port, proxy_username, proxy_password, *args, **kwargs):
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
+        self.proxy_username = proxy_username
+        self.proxy_password = proxy_password
+        super().__init__(*args, **kwargs)
+
+    def do_CONNECT(self):
+        logging.info(f'CONNECT request for {self.path}')
+        # Parse the host and port
+        try:
+            host, port = self.path.split(':')
+            port = int(port)
+        except ValueError:
+            self.send_error(400, 'Invalid CONNECT request')
+            logging.error(f'Invalid CONNECT request: {self.path}')
+            return
+        # Establish connection to the target through SOCKS5
+        try:
+            sock = socks.socksocket()
+            sock.set_proxy(socks.SOCKS5, self.proxy_host, self.proxy_port, username=self.proxy_username, password=self.proxy_password)
+            sock.settimeout(10)  # Add timeout
+            logging.info(f'Attempting to connect to {host}:{port} via SOCKS5')
+            sock.connect((host, port))
+            logging.info(f'Connected to {host}:{port} via SOCKS5')
+        except Exception as e:
+            self.send_error(502, f'Failed to connect: {e}')
+            logging.error(f'Failed to connect to {host}:{port}: {e}')
+            return
+        # Send 200 Connection established
+        self.send_response(200, 'Connection established')
+        self.end_headers()
+        # Tunnel the data
+        conns = [self.connection, sock]
+        try:
+            while True:
+                try:
+                    r, w, e = select.select(conns, [], conns, 1)
+                    if e:
+                        logging.warning(f'Error in select for {host}:{port}')
+                        break
+                    if not r:
+                        continue
+                    for s in r:
+                        other = sock if s is self.connection else self.connection
+                        data = s.recv(4096)
+                        if not data:
+                            logging.info(f'No data received, closing tunnel for {host}:{port}')
+                            break
+                        other.send(data)
+                    else:
+                        continue
+                    break
+                except ConnectionResetError:
+                    logging.warning(f'Connection reset for {host}:{port}')
+                    break
+                except Exception as e:
+                    logging.error(f'Error during tunneling for {host}:{port}: {e}')
+                    break
+        finally:
+            sock.close()
+            logging.info(f'Closed connection to {host}:{port}')
+
+    def do_GET(self):
+        # For HTTP requests, use requests with socks
+        import requests
+        try:
+            if self.path.startswith('http://'):
+                url = self.path
+            else:
+                url = 'http://' + self.path
+            logging.info(f'Proxying GET request to {url}')
+            proxies = {
+                'http': f'socks5h://{self.proxy_username}:{self.proxy_password}@{self.proxy_host}:{self.proxy_port}',
+                'https': f'socks5h://{self.proxy_username}:{self.proxy_password}@{self.proxy_host}:{self.proxy_port}'
+            }
+            resp = requests.get(url, proxies=proxies, timeout=10)
+            self.send_response(resp.status_code)
+            for k, v in resp.headers.items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(resp.content)
+            logging.info(f'Successfully proxied GET to {url}, status: {resp.status_code}')
+        except Exception as e:
+            self.send_error(502, f'Proxy error: {e}')
+            logging.error(f'Proxy error for {url}: {e}')
+
+# Threading HTTP Server
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+# Function to run the bridge server
+def run_bridge_server(proxy_host, proxy_port, proxy_username, proxy_password):
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    def handler_factory(*args, **kwargs):
+        return ProxyHTTPRequestHandler(proxy_host, proxy_port, proxy_username, proxy_password, *args, **kwargs)
+    
+    # Find an available port starting from 8888
+    import socket
+    port = 8888
+    max_attempts = 100
+    server = None
+    
+    for attempt in range(max_attempts):
+        try:
+            server = ThreadingHTTPServer(('127.0.0.1', port), handler_factory)
+            print(f'HTTP-to-SOCKS5 bridge running on 127.0.0.1:{port}')
+            break
+        except OSError as e:
+            if e.errno == 98 or e.errno == 10048:  # Address already in use
+                port += 1
+                continue
+            else:
+                raise
+    
+    if server is None:
+        raise RuntimeError(f"Could not find an available port after {max_attempts} attempts")
+    
+    # Start server in a thread
+    import threading
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+    
+    # Store the port in the server object for later retrieval
+    server.bridge_port = port
+    
+    return server
+
 class GmailAutomation:
     def __init__(self):
         self.playwright = None
-        self.browser = None
+        self.browser_direct = None  # Browser for direct connections
+        self.browser_proxy = None   # Browser for proxy connections
         self.contexts: Dict[str, BrowserContext] = {}
         self.cookies_dir = Path(COOKIE_STORAGE_PATH)
         self.cookies_dir.mkdir(exist_ok=True)
         self.screenshots_dir = Path("screenshots")
         self.screenshots_dir.mkdir(exist_ok=True)
+        self.bridge_server = None
 
     async def start(self):
         self.playwright = await async_playwright().start()
 
-        # Use Firefox for SOCKS5 proxy support, Chromium for everything else
-        # Firefox supports SOCKS5 proxy authentication, Chromium does not
-        # Choose browser based on proxy requirements
-        if USE_FIREFOX_FOR_SOCKS5:
-            print("🦊 Using Firefox browser for SOCKS5 proxy support")
-            browser_config = {
-                "headless": BROWSER_HEADLESS,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",  # Remove automation indicator
-                    "--disable-web-security",  # Disable web security
-                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",  # Firefox user agent
-                    "--accept-lang=en-US,en",  # Set language
-                    # Allow extensions for FoxyProxy to work
-                    # "--disable-extensions",  # Commented out to allow FoxyProxy
-                    "--disable-plugins",  # Disable plugins
-                    "--disable-images",  # Disable images for speed
-                ]
-            }
-            if USE_PROXY:
-                browser_config["proxy"] = {"server": "http://per-context"}  # Dummy global proxy as per Playwright docs
-            self.browser = await self.playwright.firefox.launch(**browser_config)
-        else:
-            print("🌐 Using Chromium browser (default)")
-            browser_config = {
-                "headless": BROWSER_HEADLESS,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",  # Remove automation indicator
-                    "--disable-web-security",  # Disable web security
-                    "--disable-features=VizDisplayCompositor",  # Disable certain features
-                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",  # Realistic user agent
-                    "--accept-lang=en-US,en",  # Set language
-                    "--disable-extensions",  # Disable extensions
-                    "--disable-plugins",  # Disable plugins
-                    "--disable-images",  # Disable images for speed
-                    "--disable-javascript-harmony-shipping",  # Disable certain JS features
-                ]
-            }
-            if USE_PROXY:
-                browser_config["proxy"] = {"server": "http://per-context"}  # Dummy global proxy as per Playwright docs
-            self.browser = await self.playwright.chromium.launch(**browser_config)
+        # Launch browser for direct connections (no proxy)
+        print("🌐 Launching Chromium browser for direct connections")
+        direct_config = {
+            "headless": BROWSER_HEADLESS,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "--accept-lang=en-US,en",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-images",
+                "--disable-javascript-harmony-shipping",
+            ],
+            "proxy": None
+        }
+        self.browser_direct = await self.playwright.chromium.launch(**direct_config)
+
+        # Launch browser for proxy connections
+        print("🌐 Launching Chromium browser for proxy connections")
+        proxy_config = {
+            "headless": BROWSER_HEADLESS,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "--accept-lang=en-US,en",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-images",
+                "--disable-javascript-harmony-shipping",
+            ],
+            "proxy": {"server": "http://example.com:8080"}  # Dummy global proxy for per-context support
+        }
+        self.browser_proxy = await self.playwright.chromium.launch(**proxy_config)
 
     async def stop(self):
         for context in self.contexts.values():
             await context.close()
-        if self.browser:
-            await self.browser.close()
-        # Close Firefox browser if it exists
-        if hasattr(self, 'firefox_browser') and self.firefox_browser:
-            await self.firefox_browser.close()
+        if self.browser_direct:
+            await self.browser_direct.close()
+        if self.browser_proxy:
+            await self.browser_proxy.close()
         if self.playwright:
             await self.playwright.stop()
 
@@ -137,55 +276,30 @@ class GmailAutomation:
             return self.contexts[email]
 
         context_options = {}
-        browser_type = "chromium"  # Default browser
-
-        # Check if we should use Firefox for FoxyProxy (even without app-level proxy config)
-        if USE_FIREFOX_FOR_SOCKS5:
-            print(f"🦊 Using Firefox browser for FoxyProxy compatibility")
-            if not USE_PROXY:
-                print(f"🛡️ FoxyProxy extension will handle SOCKS5 proxy configuration")
-            browser_type = "firefox"
-
-        # Handle proxy configuration (either global or per-request)
+        
+        # Choose browser based on proxy
         if proxy:
-            # Determine proxy type based on the proxy configuration
-            proxy_type = proxy.get("type", "http")  # Default to http if not specified
-
+            browser = self.browser_proxy
+            # Handle proxy configuration
+            proxy_type = proxy.get("type", "socks5")
             print(f"🔧 Configuring {proxy_type.upper()} proxy: {proxy['host']}:{proxy['port']}")
             print(f"👤 Username: {proxy.get('username', 'None')}")
 
             if proxy_type.lower() == "socks5":
-                if USE_FIREFOX_FOR_SOCKS5:
-                    print(f"🦊 Using Firefox for SOCKS5 proxy (DNS protection enabled)")
-                    browser_type = "firefox"
-
-                    # Check if proxy has authentication
-                    if proxy.get("username") and proxy.get("password"):
-                        print(f"⚠️  SOCKS5 proxy with authentication detected")
-                        print(f"⚠️  Playwright Firefox doesn't support SOCKS5 authentication")
-                        print(f"💡 Consider using HTTP proxy instead or configure proxy externally")
-
-                        # For now, try without authentication in context options
-                        context_options["proxy"] = {
-                            "server": f"socks5://{proxy['host']}:{proxy['port']}"
-                        }
-                    else:
-                        # No authentication - this should work
-                        context_options["proxy"] = {
-                            "server": f"socks5://{proxy['host']}:{proxy['port']}"
-                        }
-
-                    print(f"🛡️  DNS protection enabled for SOCKS5 proxy")
-                    print(f"🌐 Firefox proxy configuration: {context_options['proxy']}")
-                else:
-                    print(f"⚠️  SOCKS5 proxy requested but USE_FIREFOX_FOR_SOCKS5=False")
-                    print(f"💡 To use SOCKS5 proxies, set USE_FIREFOX_FOR_SOCKS5=true in .env")
-                    print(f"🔄 Falling back to direct connection (no proxy)")
+                print(f"🌉 Using HTTP-to-SOCKS5 bridge for proxy: {proxy['host']}:{proxy['port']}")
+                # Start the bridge server
+                self.bridge_server = run_bridge_server(proxy['host'], proxy['port'], proxy.get('username'), proxy.get('password'))
+                # Wait for bridge to start
+                import time
+                time.sleep(2)
+                # Configure proxy to use the bridge
+                bridge_port = getattr(self.bridge_server, 'bridge_port', 8888)
+                context_options["proxy"] = {
+                    "server": f"http://127.0.0.1:{bridge_port}"
+                }
+                print(f"🌐 Bridge proxy configuration: {context_options['proxy']}")
             elif proxy_type.lower() == "http":
-                # HTTP/HTTPS proxy - works with Chromium
                 print(f"🌐 Using HTTP proxy with Chromium browser")
-                browser_type = "chromium"  # Ensure we use Chromium for HTTP proxies
-
                 # Configure HTTP proxy for Playwright
                 server_url = f"http://{proxy['host']}:{proxy['port']}"
                 context_options["proxy"] = {
@@ -196,167 +310,46 @@ class GmailAutomation:
                 print(f"🌐 HTTP proxy configuration: {context_options['proxy']}")
             else:
                 print(f"⚠️  Unknown proxy type: {proxy_type}")
-                print(f"🔄 Falling back to direct connection (no proxy)")
-
-            # Test proxy connectivity (simple TCP connection test)
-            import socket
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)  # 5 second timeout
-                result = sock.connect_ex((proxy['host'], int(proxy['port'])))
-                sock.close()
-
-                if result == 0:
-                    print(f"✅ Proxy server is reachable: {proxy['host']}:{proxy['port']}")
-                else:
-                    print(f"⚠️  Proxy server is not reachable: {proxy['host']}:{proxy['port']}")
-            except Exception as e:
-                print(f"⚠️  Could not test proxy connectivity: {e}")
-        elif USE_PROXY:
-            print(f"⚠️  Global proxy enabled but no proxy configuration provided")
-            print(f"💡 Either disable USE_PROXY or provide proxy configuration")
         else:
-            print(f"🌐 No proxy configuration provided - using direct connection")
+            browser = self.browser_direct
+            print(f"🌐 Using direct connection (no proxy)")
 
         try:
-            # Create browser instance based on type
-            if browser_type == "firefox":
-                if not hasattr(self, 'firefox_browser') or self.firefox_browser is None:
-                    print(f"🦊 Launching Firefox browser for SOCKS5 proxy support...")
-
-                    # Prepare Firefox launch arguments
-                    firefox_args = [
-                        "--disable-extensions",
-                        "--disable-default-apps",
-                        "--disable-sync",
-                        "--disable-translate",
-                        "--hide-scrollbars",
-                        "--metrics-recording-only",
-                        "--mute-audio",
-                        "--no-first-run",
-                        "--safebrowsing-disable-auto-update"
-                    ]
-
-                    # Add proxy arguments if proxy is configured
-                    if proxy and proxy_type.lower() == "socks5":
-                        if proxy.get("username") and proxy.get("password"):
-                            print(f"⚠️  SOCKS5 with authentication - using system proxy method")
-                            print(f"💡 For authenticated SOCKS5, consider using HTTP proxy or external proxy configuration")
-                            # For authenticated SOCKS5, we'll try environment variables
-                            import os
-                            os.environ['http_proxy'] = f"socks5://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
-                            os.environ['https_proxy'] = f"socks5://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
-                        else:
-                            # No authentication - use command line args
-                            firefox_args.extend([
-                                f"--proxy-server=socks5://{proxy['host']}:{proxy['port']}",
-                                "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE " + proxy['host'],
-                                "--proxy-bypass-list=<loopback>"
-                            ])
-
-                    self.firefox_browser = await self.playwright.firefox.launch(
-                        headless=BROWSER_HEADLESS,
-                        args=firefox_args
-                    )
-                context = await self.firefox_browser.new_context(**context_options)
-                print(f"✅ Firefox browser context created successfully with SOCKS5 proxy")
-            else:
-                context = await self.browser.new_context(**context_options)
-                print(f"✅ Browser context created successfully")
-
-        except Exception as proxy_error:
-            print(f"❌ Failed to create context with proxy: {proxy_error}")
-
-            # Provide specific guidance for SOCKS5 authentication issues
-            if proxy and proxy.get("type", "").lower() == "socks5" and proxy.get("username"):
-                print(f"💡 SOCKS5 Authentication Issue Detected!")
-                print(f"🔧 Solutions:")
-                print(f"   1. Use HTTP proxy instead of SOCKS5")
-                print(f"   2. Configure proxy externally (system settings)")
-                print(f"   3. Use proxy extension like FoxyProxy")
-                print(f"   4. Convert SOCKS5 to HTTP using a proxy wrapper")
-
-            # Fallback: Try without proxy
-            print(f"🔄 Attempting to create context without proxy...")
-            fallback_options = {k: v for k, v in context_options.items() if k != "proxy"}
-            try:
-                if browser_type == "firefox" and hasattr(self, 'firefox_browser'):
-                    context = await self.firefox_browser.new_context(**fallback_options)
-                else:
-                    context = await self.browser.new_context(**fallback_options)
-                print(f"✅ Browser context created successfully without proxy (fallback)")
-            except Exception as fallback_error:
-                print(f"❌ Failed to create context even without proxy: {fallback_error}")
-                raise proxy_error  # Raise original error
+            context = await browser.new_context(**context_options)
+            print(f"✅ Browser context created successfully")
+        except Exception as e:
+            print(f"❌ Failed to create context: {e}")
+            raise
 
         # Add browser-specific scripts to hide automation indicators
-        if USE_FIREFOX_FOR_SOCKS5:
-            # Firefox-specific automation hiding
-            await context.add_init_script("""
-                // Hide automation indicators for Firefox
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-
-                // Mock plugins and languages for Firefox
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [
-                        { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-                        { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-                        { name: 'Native Client', description: '', filename: 'internal-nacl-plugin' }
-                    ],
-                });
-
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-
-                // Mock permissions for Firefox
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-            """)
-        else:
-            # Chrome-specific automation hiding
-            await context.add_init_script("""
-                // Hide automation indicators for Chrome
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-
-                // Mock plugins and languages for Chrome
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [
-                        { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-                        { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-                        { name: 'Native Client', description: '', filename: 'internal-nacl-plugin' }
-                    ],
-                });
-
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-
-                // Mock permissions for Chrome
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-            """)
-        
-        self.contexts[email] = context
+        await context.add_init_script("""
+            // Hide automation indicators
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+        """)
 
         # Load existing cookies
-        cookies = await self.load_cookies(email)
+        # For proxy contexts, use the base email for cookie loading
+        cookie_email = email.split("_proxy_")[0] if "_proxy_" in email else email
+        cookies = await self.load_cookies(cookie_email)
         if cookies:
             await context.add_cookies(cookies)
+            print(f"✅ Loaded {len(cookies)} cookies for {cookie_email}")
+        else:
+            print(f"⚠️  No cookies found for {cookie_email}")
 
+        # Store context for reuse (except for proxy contexts)
+        if "_proxy_" not in email:
+            self.contexts[email] = context
         return context
+
+    def stop_bridge(self):
+        if self.bridge_server:
+            print("Stopping HTTP-to-SOCKS5 bridge...")
+            self.bridge_server.shutdown()
+            self.bridge_server = None
+            print("Bridge stopped.")
 
     async def login_gmail(self, email: str, browser_pass: str, backup_code: Optional[str] = None,
                          proxy: Optional[Dict] = None) -> bool:
@@ -1362,6 +1355,7 @@ class GmailAutomation:
             print(f"Login error for {email}: {e}")
             return False
         finally:
+            self.stop_bridge()
             await page.close()
 
     async def check_session_validity(self, email: str) -> bool:
@@ -1471,14 +1465,24 @@ class GmailAutomation:
 
             # Step 1: Navigate to Gmail (always navigate to ensure we're on Gmail)
             print(f"   Step 1: Navigating to Gmail...")
-            await page.goto("https://mail.google.com")
-            await page.wait_for_timeout(3000)  # Wait for page to load
+            await page.goto("https://mail.google.com/mail/u/0/#inbox", timeout=120000)
+            await page.wait_for_load_state('domcontentloaded')
+            await page.wait_for_timeout(1000)  # Wait for page to load
             await page.screenshot(path=f"screenshots/send_email_step1_navigate_{email}.png")
+
+            # Check if we're actually on Gmail or redirected to login
+            current_url = page.url
+            if "mail.google.com" not in current_url or "accounts.google.com" in current_url:
+                print(f"   ❌ Session expired or cookies invalid - redirected to: {current_url}")
+                print(f"   Please login again to refresh the session")
+                return False
 
             # Step 2: Wait for Gmail to fully load and find compose button
             print(f"   Step 2: Waiting for Gmail to load...")
-            max_wait_time = 30000  # 30 seconds
-            wait_interval = 1000   # Check every 1 second
+            
+            max_wait_time = 120000  # 60 seconds for compose button detection
+            print(f"   Looking for compose button (will timeout in {max_wait_time//1000} seconds)...")
+            wait_interval = 200   # Check every 0.2 seconds
             elapsed = 0
             compose_found = False
 
@@ -1549,8 +1553,8 @@ class GmailAutomation:
 
             # Step 4: Wait for compose window to appear
             print(f"   Step 4: Waiting for compose window...")
-            await page.wait_for_timeout(2000)  # Give time for compose window to open
-
+            await page.wait_for_timeout(3000)  # Increased wait time for compose window to load
+            
             # Take screenshot of compose window
             await page.screenshot(path=f"screenshots/send_email_step4_compose_window_{email}.png")
 
@@ -1564,7 +1568,16 @@ class GmailAutomation:
                 "input[name='to']",
                 "textarea[aria-label='To']",
                 "div[aria-label='To'] input",
-                "div[data-tooltip='Recipients'] input"
+                "div[data-tooltip='Recipients'] input",
+                "input[aria-label*='To']",  # More flexible aria-label matching
+                "input[placeholder*='recipients']",
+                "input[placeholder*='email']",
+                "div[role='combobox'] input",  # Gmail's recipient input might use combobox
+                "[data-initial-value] input",  # Gmail sometimes uses this
+                "input[type='text']:not([aria-label='Subject']):not([aria-label*='Body'])",  # Fallback for text inputs
+                "textarea[role='textbox']",  # Sometimes TO field is a textarea
+                ".agP.aFw input",  # Gmail's internal class for recipient fields
+                ".vO input"  # Another Gmail internal class
             ]
 
             to_field = None
@@ -1578,12 +1591,43 @@ class GmailAutomation:
                 except Exception as e:
                     print(f"      Error checking TO selector {selector}: {e}")
 
+            # If no TO field found with specific selectors, debug all input fields
+            if not to_field:
+                print(f"   🔍 Debug: Analyzing all input fields in compose window...")
+                all_inputs = await page.locator("input, textarea").all()
+                print(f"   📊 Total input/textarea fields found: {len(all_inputs)}")
+                
+                for i, inp in enumerate(all_inputs):
+                    try:
+                        input_type = await inp.get_attribute("type") or "text"
+                        input_placeholder = await inp.get_attribute("placeholder") or ""
+                        input_aria_label = await inp.get_attribute("aria-label") or ""
+                        input_name = await inp.get_attribute("name") or ""
+                        input_class = await inp.get_attribute("class") or ""
+                        is_visible = await inp.is_visible()
+                        
+                        print(f"   🔍 Field {i}: type='{input_type}' placeholder='{input_placeholder}' aria-label='{input_aria_label}' name='{input_name}' class='{input_class}' visible={is_visible}")
+                    except Exception as e:
+                        print(f"   🔍 Field {i}: Error getting attributes - {e}")
+                
+                await page.screenshot(path=f"screenshots/send_email_to_field_debug_{email}.png")
+
             if not to_field:
                 print(f"   ❌ TO field not found")
                 await page.screenshot(path=f"screenshots/send_email_to_field_missing_{email}.png")
                 return False
 
             # Check if TO field is ready
+            # Wait for TO field to be visible and ready
+            print(f"   Waiting for TO field to be ready...")
+            try:
+                await to_field.wait_for(state='visible', timeout=5000)
+                await to_field.wait_for(state='attached', timeout=5000)
+                # Additional wait to ensure it's fully interactive
+                await page.wait_for_timeout(1000)
+            except Exception as e:
+                print(f"   ⚠️  TO field wait failed: {e}")
+            
             is_visible = await to_field.is_visible()
             is_enabled = await to_field.is_enabled()
             print(f"      TO field visible: {is_visible}, enabled: {is_enabled}")
@@ -1620,6 +1664,13 @@ class GmailAutomation:
                     print(f"      Error checking SUBJECT selector {selector}: {e}")
 
             if subject_field:
+                # Wait for SUBJECT field to be ready
+                try:
+                    await subject_field.wait_for(state='visible', timeout=3000)
+                    await page.wait_for_timeout(500)
+                except Exception as e:
+                    print(f"   ⚠️  SUBJECT field wait failed: {e}")
+                
                 is_visible = await subject_field.is_visible()
                 is_enabled = await subject_field.is_enabled()
                 print(f"      SUBJECT field visible: {is_visible}, enabled: {is_enabled}")
@@ -1661,6 +1712,13 @@ class GmailAutomation:
                 return False
 
             # Check if BODY field is ready
+            # Wait for BODY field to be ready
+            try:
+                await body_field.wait_for(state='visible', timeout=3000)
+                await page.wait_for_timeout(500)
+            except Exception as e:
+                print(f"   ⚠️  BODY field wait failed: {e}")
+            
             is_visible = await body_field.is_visible()
             is_enabled = await body_field.is_enabled()
             print(f"      BODY field visible: {is_visible}, enabled: {is_enabled}")
@@ -1731,11 +1789,14 @@ class GmailAutomation:
         except Exception as e:
             print(f"Send email error for {email}: {e}")
             await page.screenshot(path=f"screenshots/send_email_error_{email}.png")
+            if proxy:
+                await context.close()
             return False
         finally:
-            # Only close the page if we created a new one (not reusing existing session)
-            # Since we always navigate to Gmail now, we don't close existing pages
-            pass
+            # Close proxy contexts since they are not reused
+            if proxy:
+                self.stop_bridge()
+                await context.close()
 
     def get_sms_number(self, service: str = "google") -> Optional[str]:
         if not SMS_API_KEY:

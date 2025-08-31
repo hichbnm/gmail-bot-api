@@ -2,12 +2,12 @@
   "proxies": [
     {
       "id": "proxy_002",
-      "host": "195.35.113.45",
-      "port": 8080,
-      "username": "proxyuser2",
-      "password": "proxypass2",
-      "type": "http",
-      "country": "US",
+      "host": "195.35.113.44",
+      "port": 4005,
+      "username": "slpPJ73G3XhC",
+      "password": "J4J0Ai5jUvQE",
+      "type": "socks5",
+      "country": "Unknown",
       "status": "active",
       "last_used": null,
       "success_rate": 1.0

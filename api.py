@@ -82,7 +82,7 @@ async def login_accounts(request: dict):
             proxy = None
             if account.proxy_host:
                 proxy = {
-                    "type": "http",  # Use HTTP for better compatibility
+                    "type": "socks5",  # Use SOCKS5 for the bridge proxy
                     "host": account.proxy_host,
                     "port": account.proxy_port,
                     "username": account.proxy_user,
@@ -95,6 +95,9 @@ async def login_accounts(request: dict):
                 account.backup_code,
                 proxy
             )
+
+            # Stop the bridge after login attempt
+            automation.stop_bridge()
 
             if success:
                 log_info(f"Login successful for: {account.email}")
@@ -110,6 +113,8 @@ async def login_accounts(request: dict):
                 "login_success": False,
                 "error": str(e)
             })
+            # Stop the bridge in case of exception
+            automation.stop_bridge()
 
     log_info(f"Login process completed. Success: {sum(1 for r in results if r['login_success'])}/{len(results)}")
     return {"results": results}
@@ -171,44 +176,19 @@ async def send_emails(request: SendRequest):
         if account.email not in automation.contexts:
             log_info(f"Loading session for {account.email}")
 
-            # Auto-assign proxy if not specified and USE_PROXY is enabled
-            if not account.proxy_host and USE_PROXY:
-                log_info(f"🔄 Auto-assigning proxy for {account.email}")
-                auto_proxy = get_proxy_for_account(account.email)
-                if auto_proxy:
-                    account_proxy = {
-                        "type": auto_proxy.get("type", "http"),  # Use actual proxy type
-                        "host": auto_proxy["host"],
-                        "port": auto_proxy["port"],
-                        "username": auto_proxy["username"],
-                        "password": auto_proxy["password"]
-                    }
-                    log_info(f"✅ Assigned proxy {auto_proxy['id']} to {account.email}")
-                else:
-                    log_error(f"❌ No proxy available for {account.email}")
-                    # Skip all emails for this account
-                    for _ in range(emails_for_this_account):
-                        if email_index < len(request.emails):
-                            email_content = request.emails[email_index]
-                            results.append({
-                                "email_index": email_index + 1,
-                                "email": account.email,
-                                "to": email_content.to,
-                                "status": "No proxy available for account"
-                            })
-                            email_index += 1
-                    continue
-            elif not account.proxy_host and not USE_PROXY:
-                log_info(f"🌐 Proxy usage disabled - using direct connection for {account.email}")
-            else:
-                # Use manually specified proxy (default to HTTP since we're using HTTP proxies)
+            # Set proxy if provided in the request
+            if account.proxy_host:
                 account_proxy = {
-                    "type": "http",
+                    "type": "socks5",
                     "host": account.proxy_host,
                     "port": account.proxy_port,
                     "username": account.proxy_user,
                     "password": account.proxy_pass
                 }
+                log_info(f"🔧 Using provided proxy for {account.email}: {account.proxy_host}:{account.proxy_port}")
+            else:
+                account_proxy = None
+                log_info(f"🌐 Using direct connection for {account.email} (no proxy)")
 
             context = await automation.create_context(account.email, account_proxy)
 
@@ -274,9 +254,9 @@ async def send_emails(request: SendRequest):
                 # Prepare proxy for this specific email
                 email_proxy = None
                 if email_content.proxy_host:
-                    # Use email-specific proxy (default to HTTP since we're using HTTP proxies)
+                    # Use email-specific proxy (use SOCKS5 for the bridge proxy)
                     email_proxy = {
-                        "type": "http",
+                        "type": "socks5",
                         "host": email_content.proxy_host,
                         "port": email_content.proxy_port,
                         "username": email_content.proxy_user,
@@ -330,6 +310,9 @@ async def send_emails(request: SendRequest):
                 })
 
             email_index += 1
+
+        # Stop the bridge after processing all emails for this account
+        automation.stop_bridge()
 
     successful_sends = sum(1 for r in results if r['status'] == 'Email sent successfully')
     log_info(f"Email sending completed. Success: {successful_sends}/{len(request.emails)}")

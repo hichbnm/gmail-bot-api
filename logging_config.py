@@ -27,7 +27,8 @@ def setup_logging():
     file_handler = logging.handlers.RotatingFileHandler(
         'logs/gmail_api.log',
         maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
+        backupCount=5,
+        encoding='utf-8'
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
